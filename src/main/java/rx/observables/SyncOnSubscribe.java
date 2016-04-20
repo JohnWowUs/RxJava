@@ -23,7 +23,9 @@ import rx.Observer;
 import rx.Producer;
 import rx.Subscriber;
 import rx.Subscription;
+import rx.annotations.Beta;
 import rx.annotations.Experimental;
+import rx.exceptions.Exceptions;
 import rx.functions.Action0;
 import rx.functions.Action1;
 import rx.functions.Action2;
@@ -45,7 +47,7 @@ import rx.plugins.RxJavaPlugins;
  * @param <T>
  *            the type of {@code Subscribers} that will be compatible with {@code this}.
  */
-@Experimental
+@Beta
 public abstract class SyncOnSubscribe<S, T> implements OnSubscribe<T> {
     
     /* (non-Javadoc)
@@ -53,7 +55,16 @@ public abstract class SyncOnSubscribe<S, T> implements OnSubscribe<T> {
      */
     @Override
     public final void call(final Subscriber<? super T> subscriber) {
-        S state = generateState();
+        S state;
+        
+        try {
+            state = generateState();
+        } catch (Throwable e) {
+            Exceptions.throwIfFatal(e);
+            subscriber.onError(e);
+            return;
+        }
+        
         SubscriptionProducer<S, T> p = new SubscriptionProducer<S, T>(subscriber, this, state);
         subscriber.add(p);
         subscriber.setProducer(p);
@@ -114,10 +125,10 @@ public abstract class SyncOnSubscribe<S, T> implements OnSubscribe<T> {
      * @param next
      *            produces data to the downstream subscriber (see {@link #next(Object, Subscriber)
      *            next(S, Subscriber)})
-     * @return an OnSubscribe that emits data in a protocol compatible with back-pressure.
+     * @return a SyncOnSubscribe that emits data in a protocol compatible with back-pressure.
      */
-    @Experimental
-    public static <S, T> OnSubscribe<T> createSingleState(Func0<? extends S> generator, 
+    @Beta
+    public static <S, T> SyncOnSubscribe<S, T> createSingleState(Func0<? extends S> generator, 
             final Action2<? super S, ? super Observer<? super T>> next) {
         Func2<S, ? super Observer<? super T>, S> nextFunc = new Func2<S, Observer<? super T>, S>() {
             @Override
@@ -142,11 +153,11 @@ public abstract class SyncOnSubscribe<S, T> implements OnSubscribe<T> {
      *            next(S, Subscriber)})
      * @param onUnsubscribe
      *            clean up behavior (see {@link #onUnsubscribe(Object) onUnsubscribe(S)})
-     * @return an OnSubscribe that emits data downstream in a protocol compatible with
+     * @return a SyncOnSubscribe that emits data downstream in a protocol compatible with
      *         back-pressure.
      */
-    @Experimental
-    public static <S, T> OnSubscribe<T> createSingleState(Func0<? extends S> generator, 
+    @Beta
+    public static <S, T> SyncOnSubscribe<S, T> createSingleState(Func0<? extends S> generator, 
             final Action2<? super S, ? super Observer<? super T>> next, 
             final Action1<? super S> onUnsubscribe) {
         Func2<S, Observer<? super T>, S> nextFunc = new Func2<S, Observer<? super T>, S>() {
@@ -170,11 +181,11 @@ public abstract class SyncOnSubscribe<S, T> implements OnSubscribe<T> {
      *            next(S, Subscriber)})
      * @param onUnsubscribe
      *            clean up behavior (see {@link #onUnsubscribe(Object) onUnsubscribe(S)})
-     * @return an OnSubscribe that emits data downstream in a protocol compatible with
+     * @return a SyncOnSubscribe that emits data downstream in a protocol compatible with
      *         back-pressure.
      */
-    @Experimental
-    public static <S, T> OnSubscribe<T> createStateful(Func0<? extends S> generator, 
+    @Beta
+    public static <S, T> SyncOnSubscribe<S, T> createStateful(Func0<? extends S> generator, 
             Func2<? super S, ? super Observer<? super T>, ? extends S> next, 
             Action1<? super S> onUnsubscribe) {
         return new SyncOnSubscribeImpl<S, T>(generator, next, onUnsubscribe);
@@ -189,11 +200,11 @@ public abstract class SyncOnSubscribe<S, T> implements OnSubscribe<T> {
      * @param next
      *            produces data to the downstream subscriber (see {@link #next(Object, Subscriber)
      *            next(S, Subscriber)})
-     * @return an OnSubscribe that emits data downstream in a protocol compatible with
+     * @return a SyncOnSubscribe that emits data downstream in a protocol compatible with
      *         back-pressure.
      */
-    @Experimental
-    public static <S, T> OnSubscribe<T> createStateful(Func0<? extends S> generator, 
+    @Beta
+    public static <S, T> SyncOnSubscribe<S, T> createStateful(Func0<? extends S> generator, 
             Func2<? super S, ? super Observer<? super T>, ? extends S> next) {
         return new SyncOnSubscribeImpl<S, T>(generator, next);
     }
@@ -208,11 +219,11 @@ public abstract class SyncOnSubscribe<S, T> implements OnSubscribe<T> {
      * @param next
      *            produces data to the downstream subscriber (see {@link #next(Object, Subscriber)
      *            next(S, Subscriber)})
-     * @return an OnSubscribe that emits data downstream in a protocol compatible with
+     * @return a SyncOnSubscribe that emits data downstream in a protocol compatible with
      *         back-pressure.
      */
-    @Experimental
-    public static <T> OnSubscribe<T> createStateless(final Action1<? super Observer<? super T>> next) {
+    @Beta
+    public static <T> SyncOnSubscribe<Void, T> createStateless(final Action1<? super Observer<? super T>> next) {
         Func2<Void, Observer<? super T>, Void> nextFunc = new Func2<Void, Observer<? super T>, Void>() {
             @Override
             public Void call(Void state, Observer<? super T> subscriber) {
@@ -235,11 +246,11 @@ public abstract class SyncOnSubscribe<S, T> implements OnSubscribe<T> {
      *            next(S, Subscriber)})
      * @param onUnsubscribe
      *            clean up behavior (see {@link #onUnsubscribe(Object) onUnsubscribe(S)})
-     * @return an OnSubscribe that emits data downstream in a protocol compatible with
+     * @return a SyncOnSubscribe that emits data downstream in a protocol compatible with
      *         back-pressure.
      */
-    @Experimental
-    public static <T> OnSubscribe<T> createStateless(final Action1<? super Observer<? super T>> next, 
+    @Beta
+    public static <T> SyncOnSubscribe<Void, T> createStateless(final Action1<? super Observer<? super T>> next, 
             final Action0 onUnsubscribe) {
         Func2<Void, Observer<? super T>, Void> nextFunc = new Func2<Void, Observer<? super T>, Void>() {
             @Override
@@ -271,7 +282,7 @@ public abstract class SyncOnSubscribe<S, T> implements OnSubscribe<T> {
         private final Func2<? super S, ? super Observer<? super T>, ? extends S> next;
         private final Action1<? super S> onUnsubscribe;
 
-        private SyncOnSubscribeImpl(Func0<? extends S> generator, Func2<? super S, ? super Observer<? super T>, ? extends S> next, Action1<? super S> onUnsubscribe) {
+        SyncOnSubscribeImpl(Func0<? extends S> generator, Func2<? super S, ? super Observer<? super T>, ? extends S> next, Action1<? super S> onUnsubscribe) {
             this.generator = generator;
             this.next = next;
             this.onUnsubscribe = onUnsubscribe;
@@ -322,8 +333,8 @@ public abstract class SyncOnSubscribe<S, T> implements OnSubscribe<T> {
         private boolean hasTerminated;
         
         private S state;
-        
-        private SubscriptionProducer(final Subscriber<? super T> subscriber, SyncOnSubscribe<S, T> parent, S state) {
+
+        SubscriptionProducer(final Subscriber<? super T> subscriber, SyncOnSubscribe<S, T> parent, S state) {
             this.actualSubscriber = subscriber;
             this.parent = parent;
             this.state = state;
@@ -363,7 +374,12 @@ public abstract class SyncOnSubscribe<S, T> implements OnSubscribe<T> {
         }
 
         private void doUnsubscribe() {
-            parent.onUnsubscribe(state);
+            try {
+                parent.onUnsubscribe(state);
+            } catch (Throwable e) {
+                Exceptions.throwIfFatal(e);
+                RxJavaPlugins.getInstance().getErrorHandler().handleError(e);
+            }
         }
 
         @Override

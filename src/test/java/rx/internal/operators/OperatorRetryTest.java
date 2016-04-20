@@ -598,7 +598,7 @@ public class OperatorRetryTest {
         }
     }
 
-    /** Observer for listener on seperate thread */
+    /** Observer for listener on separate thread */
     static final class AsyncObserver<T> implements Observer<T> {
 
         protected CountDownLatch latch = new CountDownLatch(1);
@@ -874,6 +874,7 @@ public class OperatorRetryTest {
         });
         
         origin.retry()
+        .onBackpressureBuffer() // FIXME the new GroupBy won't request enough for this particular test and retry overflows
         .groupBy(new Func1<String, String>() {
             @Override
             public String call(String t1) {

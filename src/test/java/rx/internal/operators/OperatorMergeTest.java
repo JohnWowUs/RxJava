@@ -28,10 +28,10 @@ import org.junit.*;
 import org.mockito.*;
 
 import rx.*;
-import rx.Observable.OnSubscribe;
-import rx.Scheduler.Worker;
 import rx.Observable;
+import rx.Observable.OnSubscribe;
 import rx.Observer;
+import rx.Scheduler.Worker;
 import rx.functions.*;
 import rx.internal.util.RxRingBuffer;
 import rx.observers.TestSubscriber;
@@ -716,7 +716,8 @@ public class OperatorMergeTest {
             }
         };
 
-        Observable.merge(o1).observeOn(Schedulers.computation()).take(RxRingBuffer.SIZE * 2).subscribe(testSubscriber);
+        int limit = RxRingBuffer.SIZE; // the default unbounded behavior makes this test fail 100% of the time: source is too fast
+        Observable.merge(o1, limit).observeOn(Schedulers.computation()).take(RxRingBuffer.SIZE * 2).subscribe(testSubscriber);
         testSubscriber.awaitTerminalEvent();
         if (testSubscriber.getOnErrorEvents().size() > 0) {
             testSubscriber.getOnErrorEvents().get(0).printStackTrace();
@@ -946,7 +947,7 @@ public class OperatorMergeTest {
     }
 
     private Observable<Integer> createInfiniteObservable(final AtomicInteger generated) {
-        Observable<Integer> observable = Observable.from(new Iterable<Integer>() {
+        return Observable.from(new Iterable<Integer>() {
             @Override
             public Iterator<Integer> iterator() {
                 return new Iterator<Integer>() {
@@ -967,7 +968,6 @@ public class OperatorMergeTest {
                 };
             }
         });
-        return observable;
     }
 
     @Test
@@ -1302,5 +1302,72 @@ public class OperatorMergeTest {
             };
             runMerge(toHiddenScalar, ts);
         }
+    }
+    
+    @Test
+    public void testUnboundedDefaultConcurrency() {
+        List<Observable<Integer>> os = new ArrayList<Observable<Integer>>();
+        for(int i=0; i < 2000; i++) {
+            os.add(Observable.<Integer>never());
+        }
+        os.add(Observable.range(0, 100));       
+
+        TestSubscriber<Integer> ts = TestSubscriber.create();
+        Observable.merge(os).take(1).subscribe(ts);
+        ts.awaitTerminalEvent(5000, TimeUnit.MILLISECONDS);
+        ts.assertValue(0);
+        ts.assertCompleted();
+    }
+
+    @Test
+    public void testConcurrencyLimit() {
+        List<Observable<Integer>> os = new ArrayList<Observable<Integer>>();
+        for(int i=0; i < 2000; i++) {
+            os.add(Observable.<Integer>never());
+        }
+        os.add(Observable.range(0, 100));       
+
+        TestSubscriber<Integer> ts = TestSubscriber.create();
+        Observable.merge(os, Integer.MAX_VALUE).take(1).subscribe(ts);
+        ts.awaitTerminalEvent(5000, TimeUnit.MILLISECONDS);
+        ts.assertValue(0);
+        ts.assertCompleted();
+    }
+
+    @Test
+    public void negativeMaxConcurrent() {
+        try {
+            Observable.merge(Arrays.asList(Observable.just(1), Observable.just(2)), -1);
+            fail("Expected IllegalArgumentException");
+        } catch (IllegalArgumentException e) {
+            assertEquals("maxConcurrent > 0 required but it was -1", e.getMessage());
+        }
+    }
+
+    @Test
+    public void zeroMaxConcurrent() {
+        try {
+            Observable.merge(Arrays.asList(Observable.just(1), Observable.just(2)), 0);
+            fail("Expected IllegalArgumentException");
+        } catch (IllegalArgumentException e) {
+            assertEquals("maxConcurrent > 0 required but it was 0", e.getMessage());
+        }
+    }
+    
+    @Test
+    public void mergeJustNull() {
+        TestSubscriber<Integer> ts = new TestSubscriber<Integer>(0);
+        
+        Observable.range(1, 2).flatMap(new Func1<Integer, Observable<Integer>>() {
+            @Override
+            public Observable<Integer> call(Integer t) {
+                return Observable.just(null);
+            }
+        }).subscribe(ts);
+        
+        ts.requestMore(2);
+        ts.assertValues(null, null);
+        ts.assertNoErrors();
+        ts.assertCompleted();
     }
 }

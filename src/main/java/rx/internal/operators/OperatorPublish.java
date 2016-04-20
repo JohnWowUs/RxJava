@@ -81,7 +81,7 @@ public final class OperatorPublish<T> extends ConnectableObservable<T> {
                          */
                         continue;
                         /*
-                         * Note: although technically corrent, concurrent disconnects can cause 
+                         * Note: although technically correct, concurrent disconnects can cause 
                          * unexpected behavior such as child subscribers never receiving anything 
                          * (unless connected again). An alternative approach, similar to 
                          * PublishSubject would be to immediately terminate such child 
@@ -117,19 +117,46 @@ public final class OperatorPublish<T> extends ConnectableObservable<T> {
 
     public static <T, R> Observable<R> create(final Observable<? extends T> source, 
             final Func1<? super Observable<T>, ? extends Observable<R>> selector) {
+        return create(source, selector, false);
+    }
+    
+    public static <T, R> Observable<R> create(final Observable<? extends T> source, 
+            final Func1<? super Observable<T>, ? extends Observable<R>> selector, final boolean delayError) {
         return create(new OnSubscribe<R>() {
             @Override
             public void call(final Subscriber<? super R> child) {
-                ConnectableObservable<T> op = create(source);
+                final OnSubscribePublishMulticast<T> op = new OnSubscribePublishMulticast<T>(RxRingBuffer.SIZE, delayError);
                 
-                selector.call(op).unsafeSubscribe(child);
-                
-                op.connect(new Action1<Subscription>() {
+                Subscriber<R> subscriber = new Subscriber<R>() {
                     @Override
-                    public void call(Subscription t1) {
-                        child.add(t1);
+                    public void onNext(R t) {
+                        child.onNext(t);
                     }
-                });
+                    
+                    @Override
+                    public void onError(Throwable e) {
+                        op.unsubscribe();
+                        child.onError(e);
+                    }
+                    
+                    @Override
+                    public void onCompleted() {
+                        op.unsubscribe();
+                        child.onCompleted();
+                    }
+                    
+                    @Override
+                    public void setProducer(Producer p) {
+                        child.setProducer(p);
+                    }
+                };
+
+                child.add(op);
+                child.add(subscriber);
+                
+                selector.call(Observable.create(op)).unsafeSubscribe(subscriber);
+                
+                source.unsafeSubscribe(op.subscriber());
             }
         });
     }
@@ -309,7 +336,7 @@ public final class OperatorPublish<T> extends ConnectableObservable<T> {
                 if (producers.compareAndSet(c, u)) {
                     return true;
                 }
-                // if failed, some other operation succeded (another add, remove or termination)
+                // if failed, some other operation succeeded (another add, remove or termination)
                 // so retry
             }
         }
@@ -398,7 +425,7 @@ public final class OperatorPublish<T> extends ConnectableObservable<T> {
                                 ip.child.onCompleted();
                             }
                         } finally {
-                            // we explicitely unsubscribe/disconnect from the upstream
+                            // we explicitly unsubscribe/disconnect from the upstream
                             // after we sent out the terminal event to child subscribers
                             unsubscribe();
                         }
@@ -418,7 +445,7 @@ public final class OperatorPublish<T> extends ConnectableObservable<T> {
                             ip.child.onError(t);
                         }
                     } finally {
-                        // we explicitely unsubscribe/disconnect from the upstream
+                        // we explicitly unsubscribe/disconnect from the upstream
                         // after we sent out the terminal event to child subscribers
                         unsubscribe();
                     }
@@ -459,7 +486,7 @@ public final class OperatorPublish<T> extends ConnectableObservable<T> {
             try {
                 for (;;) {
                     /*
-                     * We need to read terminalEvent before checking the queue for emptyness because
+                     * We need to read terminalEvent before checking the queue for emptiness because
                      * all enqueue happens before setting the terminal event.
                      * If it were the other way around, when the emission is paused between
                      * checking isEmpty and checking terminalEvent, some other thread might
@@ -637,7 +664,7 @@ public final class OperatorPublish<T> extends ConnectableObservable<T> {
         /**
          * Indicates this child has not yet requested any value. We pretend we don't
          * see such child subscribers in dispatch() to allow other child subscribers who
-         * have requested to make progress. In a concurrent subscription scennario,
+         * have requested to make progress. In a concurrent subscription scenario,
          * one can't be sure when a subscription happens exactly so this virtual shift
          * should not cause any problems.
          */
@@ -685,7 +712,7 @@ public final class OperatorPublish<T> extends ConnectableObservable<T> {
                 }
                 // try setting the new request value
                 if (compareAndSet(r, u)) {
-                    // if successful, notify the parent dispacher this child can receive more
+                    // if successful, notify the parent dispatcher this child can receive more
                     // elements
                     parent.dispatch();
                     return;
@@ -725,7 +752,7 @@ public final class OperatorPublish<T> extends ConnectableObservable<T> {
                 }
                 // try updating the request value
                 if (compareAndSet(r, u)) {
-                    // and return the udpated value
+                    // and return the updated value
                     return u;
                 }
                 // otherwise, some concurrent activity happened and we need to retry

@@ -82,6 +82,34 @@ public class OperatorConcatTest {
 
         verify(observer, times(7)).onNext(anyString());
     }
+    
+    @Test
+    public void testConcatMapIterable() {
+        @SuppressWarnings("unchecked")
+        Observer<String> observer = mock(Observer.class);
+
+        final String[] l = { "a", "b", "c", "d", "e" };
+        
+        Func1<List<String>,List<String>> identity = new Func1<List<String>, List<String>>() {
+			@Override
+			public List<String> call(List<String> t) {
+				return t;
+			}
+		};
+
+        final Observable<List<String>> listObs = Observable.just(Arrays.asList(l));
+        final Observable<String> concatMap = listObs.concatMapIterable(identity);
+        
+        concatMap.subscribe(observer);
+
+        InOrder inOrder = inOrder(observer);
+        inOrder.verify(observer, times(1)).onNext("a");
+        inOrder.verify(observer, times(1)).onNext("b");
+        inOrder.verify(observer, times(1)).onNext("c");
+        inOrder.verify(observer, times(1)).onNext("d");
+        inOrder.verify(observer, times(1)).onNext("e");
+        inOrder.verify(observer, times(1)).onCompleted();
+    }
 
     @Test
     public void testConcatObservableOfObservables() {
@@ -393,7 +421,7 @@ public class OperatorConcatTest {
             Subscription s1 = concat.subscribe(observer);
             //Block main thread to allow observable "w1" to complete and observable "w2" to call onNext once.
             callOnce.await();
-            // Unsubcribe
+            // Unsubscribe
             s1.unsubscribe();
             //Unblock the observable to continue.
             okToContinue.countDown();
@@ -728,7 +756,7 @@ public class OperatorConcatTest {
                 Observable<Integer> observable = Observable.just(t)
                         .subscribeOn(sch)
                 ;
-                Subject<Integer, Integer> subject = BufferUntilSubscriber.create();
+                Subject<Integer, Integer> subject = UnicastSubject.create();
                 observable.subscribe(subject);
                 return subject;
             }
@@ -749,7 +777,7 @@ public class OperatorConcatTest {
                 if (counter.getAndIncrement() % 100 == 0) {
                     System.out.print("testIssue2890NoStackoverflow -> ");
                     System.out.println(counter.get());
-                };
+                }
             }
 
             @Override
@@ -822,4 +850,64 @@ public class OperatorConcatTest {
         }
     }
     
+    @Test
+    public void scalarAndRangeBackpressured() {
+        TestSubscriber<Integer> ts = TestSubscriber.create(0);
+        
+        Observable.just(1).concatWith(Observable.range(2, 3)).subscribe(ts);
+        
+        ts.assertNoValues();
+        
+        ts.requestMore(5);
+        
+        ts.assertValues(1, 2, 3, 4);
+        ts.assertCompleted();
+        ts.assertNoErrors();
+    }
+    
+    @Test
+    public void scalarAndEmptyBackpressured() {
+        TestSubscriber<Integer> ts = TestSubscriber.create(0);
+        
+        Observable.just(1).concatWith(Observable.<Integer>empty()).subscribe(ts);
+        
+        ts.assertNoValues();
+        
+        ts.requestMore(5);
+        
+        ts.assertValue(1);
+        ts.assertCompleted();
+        ts.assertNoErrors();
+    }
+
+    @Test
+    public void rangeAndEmptyBackpressured() {
+        TestSubscriber<Integer> ts = TestSubscriber.create(0);
+        
+        Observable.range(1, 2).concatWith(Observable.<Integer>empty()).subscribe(ts);
+        
+        ts.assertNoValues();
+        
+        ts.requestMore(5);
+        
+        ts.assertValues(1, 2);
+        ts.assertCompleted();
+        ts.assertNoErrors();
+    }
+
+    @Test
+    public void emptyAndScalarBackpressured() {
+        TestSubscriber<Integer> ts = TestSubscriber.create(0);
+        
+        Observable.<Integer>empty().concatWith(Observable.just(1)).subscribe(ts);
+        
+        ts.assertNoValues();
+        
+        ts.requestMore(5);
+        
+        ts.assertValue(1);
+        ts.assertCompleted();
+        ts.assertNoErrors();
+    }
+
 }

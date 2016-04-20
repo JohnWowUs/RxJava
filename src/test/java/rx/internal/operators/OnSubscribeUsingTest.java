@@ -45,9 +45,9 @@ import rx.subscriptions.Subscriptions;
 public class OnSubscribeUsingTest {
 
     private interface Resource {
-        public String getTextFromWeb();
-
-        public void dispose();
+        String getTextFromWeb();
+        
+        void dispose();
     }
 
     private static class DisposeAction implements Action1<Resource> {
@@ -108,7 +108,7 @@ public class OnSubscribeUsingTest {
         inOrder.verify(observer, times(1)).onCompleted();
         inOrder.verifyNoMoreInteractions();
 
-        // The resouce should be closed
+        // The resource should be closed
         verify(resource, times(1)).dispose();
     }
 

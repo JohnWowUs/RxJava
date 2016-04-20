@@ -15,12 +15,9 @@
  */
 package rx.observers;
 
-import rx.Observer;
-import rx.Subscriber;
-import rx.annotations.Experimental;
+import rx.*;
 import rx.exceptions.OnErrorNotImplementedException;
-import rx.functions.Action0;
-import rx.functions.Action1;
+import rx.functions.*;
 
 /**
  * Helper methods and utilities for creating and working with {@link Subscriber} objects.
@@ -31,10 +28,9 @@ public final class Subscribers {
     }
 
     /**
-     * Returns an inert {@link Subscriber} that does nothing in response to the emissions or notifications from
-     * any {@code Observable} it subscribes to. This is different, however, from an {@code EmptyObserver}, in
-     * that it will throw an exception if its {@link Subscriber#onError onError} method is called (whereas
-     * {@code EmptyObserver} will swallow the error in such a case).
+     * Returns an inert {@link Subscriber} that does nothing in response to the emissions or notifications 
+     * from any {@code Observable} it subscribes to.  Will throw an {@link OnErrorNotImplementedException} if {@link Subscriber#onError onError} 
+     * method is called
      *
      * @return an inert {@code Observer}
      */
@@ -72,8 +68,8 @@ public final class Subscribers {
 
     /**
      * Creates a {@link Subscriber} that receives the emissions of any {@code Observable} it subscribes to via
-     * {@link Subscriber#onNext onNext} but ignores {@link Subscriber#onError onError} and
-     * {@link Subscriber#onCompleted onCompleted} notifications.
+     * {@link Subscriber#onNext onNext} but ignores {@link Subscriber#onCompleted onCompleted} notifications;
+     * it will throw an {@link OnErrorNotImplementedException} if {@link Subscriber#onError onError} is invoked.
      *
      * @param onNext
      *          a function that handles each item emitted by an {@code Observable}
@@ -82,7 +78,7 @@ public final class Subscribers {
      * @return a {@code Subscriber} that calls {@code onNext} for each emitted item from the {@code Observable}
      *         the {@code Subscriber} subscribes to
      */
-    public static final <T> Subscriber<T> create(final Action1<? super T> onNext) {
+    public static <T> Subscriber<T> create(final Action1<? super T> onNext) {
         if (onNext == null) {
             throw new IllegalArgumentException("onNext can not be null");
         }
@@ -122,7 +118,7 @@ public final class Subscribers {
      *         the {@code Subscriber} subscribes to, and calls {@code onError} if the {@code Observable}
      *         notifies of an error
      */
-    public static final <T> Subscriber<T> create(final Action1<? super T> onNext, final Action1<Throwable> onError) {
+    public static <T> Subscriber<T> create(final Action1<? super T> onNext, final Action1<Throwable> onError) {
         if (onNext == null) {
             throw new IllegalArgumentException("onNext can not be null");
         }
@@ -168,7 +164,7 @@ public final class Subscribers {
      *         of an error, and calls {@code onComplete} if the {@code Observable} notifies that the observable
      *         sequence is complete
      */
-    public static final <T> Subscriber<T> create(final Action1<? super T> onNext, final Action1<Throwable> onError, final Action0 onComplete) {
+    public static <T> Subscriber<T> create(final Action1<? super T> onNext, final Action1<Throwable> onError, final Action0 onComplete) {
         if (onNext == null) {
             throw new IllegalArgumentException("onNext can not be null");
         }
@@ -213,9 +209,8 @@ public final class Subscribers {
      *         <code>subscriber</code>, has backpressure controlled by
      *         <code>subscriber</code> and uses <code>subscriber</code> to
      *         manage unsubscription.
-     * @since (if this graduates from Experimental/Beta to supported, replace this parenthetical with the release number)
+     * @since 1.1.0
      */
-    @Experimental
     public static <T> Subscriber<T> wrap(final Subscriber<? super T> subscriber) {
         return new Subscriber<T>(subscriber) {
 

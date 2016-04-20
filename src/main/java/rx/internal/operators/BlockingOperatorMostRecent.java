@@ -53,7 +53,7 @@ public final class BlockingOperatorMostRecent {
                  * Subscribe instead of unsafeSubscribe since this is the final subscribe in the chain
                  * since it is for BlockingObservable.
                  */
-                source.subscribe(mostRecentObserver);
+                ((Observable<T>)source).subscribe(mostRecentObserver);
 
                 return mostRecentObserver.getIterable();
             }
@@ -63,8 +63,8 @@ public final class BlockingOperatorMostRecent {
     private static final class MostRecentObserver<T> extends Subscriber<T> {
         final NotificationLite<T> nl = NotificationLite.instance();
         volatile Object value;
-        
-        private MostRecentObserver(T value) {
+
+        MostRecentObserver(T value) {
             this.value = nl.next(value);
         }
 

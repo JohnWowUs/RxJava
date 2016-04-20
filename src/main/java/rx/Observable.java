@@ -19,7 +19,6 @@ import rx.annotations.*;
 import rx.exceptions.*;
 import rx.functions.*;
 import rx.internal.operators.*;
-import rx.internal.producers.SingleProducer;
 import rx.internal.util.*;
 import rx.observables.*;
 import rx.observers.SafeSubscriber;
@@ -60,7 +59,7 @@ public class Observable<T> {
         this.onSubscribe = f;
     }
 
-    private static final RxJavaObservableExecutionHook hook = RxJavaPlugins.getInstance().getObservableExecutionHook();
+    static final RxJavaObservableExecutionHook hook = RxJavaPlugins.getInstance().getObservableExecutionHook();
 
     /**
      * Returns an Observable that will execute the specified function when a {@link Subscriber} subscribes to
@@ -91,8 +90,79 @@ public class Observable<T> {
      *         function
      * @see <a href="http://reactivex.io/documentation/operators/create.html">ReactiveX operators documentation: Create</a>
      */
-    public final static <T> Observable<T> create(OnSubscribe<T> f) {
+    public static <T> Observable<T> create(OnSubscribe<T> f) {
         return new Observable<T>(hook.onCreate(f));
+    }
+
+    /**
+     * Returns an Observable that respects the back-pressure semantics. When the returned Observable is 
+     * subscribed to it will initiate the given {@link SyncOnSubscribe}'s life cycle for 
+     * generating events. 
+     * 
+     * <p><b>Note:</b> the {@code SyncOnSubscribe} provides a generic way to fulfill data by iterating 
+     * over a (potentially stateful) function (e.g. reading data off of a channel, a parser, ). If your 
+     * data comes directly from an asynchronous/potentially concurrent source then consider using the
+     * {@link Observable#create(AsyncOnSubscribe) asynchronous overload}.
+     * 
+     * <p>
+     * <img width="640" height="200" src="https://raw.github.com/wiki/ReactiveX/RxJava/images/rx-operators/create-sync.png" alt="">
+     * <p>
+     * See <a href="http://go.microsoft.com/fwlink/?LinkID=205219">Rx Design Guidelines (PDF)</a> for detailed
+     * information.
+     * <dl>
+     *  <dt><b>Scheduler:</b></dt>
+     *  <dd>{@code create} does not operate by default on a particular {@link Scheduler}.</dd>
+     * </dl>
+     * 
+     * @param <T>
+     *            the type of the items that this Observable emits
+     * @param syncOnSubscribe
+     *            an implementation of {@link SyncOnSubscribe}. There are many static creation methods 
+     *            on the class for convenience.  
+     * @return an Observable that, when a {@link Subscriber} subscribes to it, will execute the specified
+     *         function
+     * @see {@link SyncOnSubscribe} {@code static create*} methods
+     * @see <a href="http://reactivex.io/documentation/operators/create.html">ReactiveX operators documentation: Create</a>
+     * @since (if this graduates from Experimental/Beta to supported, replace this parenthetical with the release number)
+     */
+    @Beta
+    public static <S, T> Observable<T> create(SyncOnSubscribe<S, T> syncOnSubscribe) {
+        return new Observable<T>(hook.onCreate(syncOnSubscribe));
+    }
+
+    /**
+     * Returns an Observable that respects the back-pressure semantics. When the returned Observable is 
+     * subscribed to it will initiate the given {@link AsyncOnSubscribe}'s life cycle for 
+     * generating events. 
+     * 
+     * <p><b>Note:</b> the {@code AsyncOnSubscribe} is useful for observable sources of data that are 
+     * necessarily asynchronous (RPC, external services, etc). Typically most use cases can be solved 
+     * with the {@link Observable#create(SyncOnSubscribe) synchronous overload}.
+     * 
+     * <p>
+     * <img width="640" height="200" src="https://raw.github.com/wiki/ReactiveX/RxJava/images/rx-operators/create-async.png" alt="">
+     * <p>
+     * See <a href="http://go.microsoft.com/fwlink/?LinkID=205219">Rx Design Guidelines (PDF)</a> for detailed
+     * information.
+     * <dl>
+     *  <dt><b>Scheduler:</b></dt>
+     *  <dd>{@code create} does not operate by default on a particular {@link Scheduler}.</dd>
+     * </dl>
+     * 
+     * @param <T>
+     *            the type of the items that this Observable emits
+     * @param asyncOnSubscribe
+     *            an implementation of {@link AsyncOnSubscribe}. There are many static creation methods 
+     *            on the class for convenience. 
+     * @return an Observable that, when a {@link Subscriber} subscribes to it, will execute the specified
+     *         function
+     * @see {@link AsyncOnSubscribe AsyncOnSubscribe} {@code static create*} methods
+     * @see <a href="http://reactivex.io/documentation/operators/create.html">ReactiveX operators documentation: Create</a>
+     * @since (if this graduates from Experimental/Beta to supported, replace this parenthetical with the release number)
+     */
+    @Experimental
+    public static <S, T> Observable<T> create(AsyncOnSubscribe<S, T> asyncOnSubscribe) {
+        return new Observable<T>(hook.onCreate(asyncOnSubscribe));
     }
 
     /**
@@ -120,11 +190,23 @@ public class Observable<T> {
      */
     @Experimental
     public <R> R extend(Func1<? super OnSubscribe<T>, ? extends R> conversion) {
-        return conversion.call(new OnSubscribe<T>() {
-            @Override
-            public void call(Subscriber<? super T> subscriber) {
-                subscriber.add(Observable.subscribe(subscriber, Observable.this));
-            }});
+        return conversion.call(new OnSubscribeExtend<T>(this));
+    }
+    
+    /**
+     * Transforms a OnSubscribe.call() into an Observable.subscribe() call.
+     * <p>Note: has to be in Observable because it calls the private subscribe() method 
+     * @param <T> the value type
+     */
+    static final class OnSubscribeExtend<T> implements OnSubscribe<T> {
+        final Observable<T> parent;
+        OnSubscribeExtend(Observable<T> parent) {
+            this.parent = parent;
+        }
+        @Override
+        public void call(Subscriber<? super T> subscriber) {
+            subscriber.add(subscribe(subscriber, parent));
+        }
     }
     
     /**
@@ -151,34 +233,7 @@ public class Observable<T> {
      * @see <a href="https://github.com/ReactiveX/RxJava/wiki/Implementing-Your-Own-Operators">RxJava wiki: Implementing Your Own Operators</a>
      */
     public final <R> Observable<R> lift(final Operator<? extends R, ? super T> operator) {
-        return new Observable<R>(new OnSubscribe<R>() {
-            @Override
-            public void call(Subscriber<? super R> o) {
-                try {
-                    Subscriber<? super T> st = hook.onLift(operator).call(o);
-                    try {
-                        // new Subscriber created and being subscribed with so 'onStart' it
-                        st.onStart();
-                        onSubscribe.call(st);
-                    } catch (Throwable e) {
-                        // localized capture of errors rather than it skipping all operators 
-                        // and ending up in the try/catch of the subscribe method which then
-                        // prevents onErrorResumeNext and other similar approaches to error handling
-                        if (e instanceof OnErrorNotImplementedException) {
-                            throw (OnErrorNotImplementedException) e;
-                        }
-                        st.onError(e);
-                    }
-                } catch (Throwable e) {
-                    if (e instanceof OnErrorNotImplementedException) {
-                        throw (OnErrorNotImplementedException) e;
-                    }
-                    // if the lift function failed all we can do is pass the error to the final Subscriber
-                    // as we don't have the operator available to us
-                    o.onError(e);
-                }
-            }
-        });
+        return new Observable<R>(new OnSubscribeLift<T, R>(onSubscribe, operator));
     }
     
     /**
@@ -231,11 +286,36 @@ public class Observable<T> {
      * @see <a href="http://reactivex.io/documentation/single.html">ReactiveX documentation: Single</a>
      * @since (if this graduates from Experimental/Beta to supported, replace this parenthetical with the release number)
      */
-    @Experimental
+    @Beta
     public Single<T> toSingle() {
         return new Single<T>(OnSubscribeSingle.create(this));
     }
 
+    /**
+     * Returns a Completable that discards all onNext emissions (similar to
+     * {@code ignoreAllElements()}) and calls onCompleted when this source observable calls
+     * onCompleted. Error terminal events are propagated.
+     * <p>
+     * <img width="640" height="295" src=
+     * "https://raw.github.com/wiki/ReactiveX/RxJava/images/rx-operators/Completable.toCompletable.png"
+     * alt="">
+     * <dl>
+     * <dt><b>Scheduler:</b></dt>
+     * <dd>{@code toCompletable} does not operate by default on a particular {@link Scheduler}.</dd>
+     * </dl>
+     *
+     * @return a Completable that calls onCompleted on it's subscriber when the source Observable
+     *         calls onCompleted
+     * @see <a href="http://reactivex.io/documentation/completable.html">ReactiveX documentation:
+     *      Completable</a>
+     * @since (if this graduates from Experimental/Beta to supported, replace this parenthetical
+     *        with the release number)
+     */
+    @Experimental
+    public Completable toCompletable() {
+        return Completable.fromObservable(this);
+    }
+    
 
     /* *********************************************************************************************************
      * Operators Below Here
@@ -258,7 +338,7 @@ public class Observable<T> {
      *         emitted an item or sent a termination notification
      * @see <a href="http://reactivex.io/documentation/operators/amb.html">ReactiveX operators documentation: Amb</a>
      */
-    public final static <T> Observable<T> amb(Iterable<? extends Observable<? extends T>> sources) {
+    public static <T> Observable<T> amb(Iterable<? extends Observable<? extends T>> sources) {
         return create(OnSubscribeAmb.amb(sources));
     }
 
@@ -280,7 +360,7 @@ public class Observable<T> {
      *         emitted an item or sent a termination notification
      * @see <a href="http://reactivex.io/documentation/operators/amb.html">ReactiveX operators documentation: Amb</a>
      */
-    public final static <T> Observable<T> amb(Observable<? extends T> o1, Observable<? extends T> o2) {
+    public static <T> Observable<T> amb(Observable<? extends T> o1, Observable<? extends T> o2) {
         return create(OnSubscribeAmb.amb(o1, o2));
     }
 
@@ -304,7 +384,7 @@ public class Observable<T> {
      *         emitted an item or sent a termination notification
      * @see <a href="http://reactivex.io/documentation/operators/amb.html">ReactiveX operators documentation: Amb</a>
      */
-    public final static <T> Observable<T> amb(Observable<? extends T> o1, Observable<? extends T> o2, Observable<? extends T> o3) {
+    public static <T> Observable<T> amb(Observable<? extends T> o1, Observable<? extends T> o2, Observable<? extends T> o3) {
         return create(OnSubscribeAmb.amb(o1, o2, o3));
     }
 
@@ -330,7 +410,7 @@ public class Observable<T> {
      *         emitted an item or sent a termination notification
      * @see <a href="http://reactivex.io/documentation/operators/amb.html">ReactiveX operators documentation: Amb</a>
      */
-    public final static <T> Observable<T> amb(Observable<? extends T> o1, Observable<? extends T> o2, Observable<? extends T> o3, Observable<? extends T> o4) {
+    public static <T> Observable<T> amb(Observable<? extends T> o1, Observable<? extends T> o2, Observable<? extends T> o3, Observable<? extends T> o4) {
         return create(OnSubscribeAmb.amb(o1, o2, o3, o4));
     }
 
@@ -358,7 +438,7 @@ public class Observable<T> {
      *         emitted an item or sent a termination notification
      * @see <a href="http://reactivex.io/documentation/operators/amb.html">ReactiveX operators documentation: Amb</a>
      */
-    public final static <T> Observable<T> amb(Observable<? extends T> o1, Observable<? extends T> o2, Observable<? extends T> o3, Observable<? extends T> o4, Observable<? extends T> o5) {
+    public static <T> Observable<T> amb(Observable<? extends T> o1, Observable<? extends T> o2, Observable<? extends T> o3, Observable<? extends T> o4, Observable<? extends T> o5) {
         return create(OnSubscribeAmb.amb(o1, o2, o3, o4, o5));
     }
 
@@ -388,7 +468,7 @@ public class Observable<T> {
      *         emitted an item or sent a termination notification
      * @see <a href="http://reactivex.io/documentation/operators/amb.html">ReactiveX operators documentation: Amb</a>
      */
-    public final static <T> Observable<T> amb(Observable<? extends T> o1, Observable<? extends T> o2, Observable<? extends T> o3, Observable<? extends T> o4, Observable<? extends T> o5, Observable<? extends T> o6) {
+    public static <T> Observable<T> amb(Observable<? extends T> o1, Observable<? extends T> o2, Observable<? extends T> o3, Observable<? extends T> o4, Observable<? extends T> o5, Observable<? extends T> o6) {
         return create(OnSubscribeAmb.amb(o1, o2, o3, o4, o5, o6));
     }
 
@@ -420,7 +500,7 @@ public class Observable<T> {
      *         emitted an item or sent a termination notification
      * @see <a href="http://reactivex.io/documentation/operators/amb.html">ReactiveX operators documentation: Amb</a>
      */
-    public final static <T> Observable<T> amb(Observable<? extends T> o1, Observable<? extends T> o2, Observable<? extends T> o3, Observable<? extends T> o4, Observable<? extends T> o5, Observable<? extends T> o6, Observable<? extends T> o7) {
+    public static <T> Observable<T> amb(Observable<? extends T> o1, Observable<? extends T> o2, Observable<? extends T> o3, Observable<? extends T> o4, Observable<? extends T> o5, Observable<? extends T> o6, Observable<? extends T> o7) {
         return create(OnSubscribeAmb.amb(o1, o2, o3, o4, o5, o6, o7));
     }
 
@@ -454,7 +534,7 @@ public class Observable<T> {
      *         emitted an item or sent a termination notification
      * @see <a href="http://reactivex.io/documentation/operators/amb.html">ReactiveX operators documentation: Amb</a>
      */
-    public final static <T> Observable<T> amb(Observable<? extends T> o1, Observable<? extends T> o2, Observable<? extends T> o3, Observable<? extends T> o4, Observable<? extends T> o5, Observable<? extends T> o6, Observable<? extends T> o7, Observable<? extends T> o8) {
+    public static <T> Observable<T> amb(Observable<? extends T> o1, Observable<? extends T> o2, Observable<? extends T> o3, Observable<? extends T> o4, Observable<? extends T> o5, Observable<? extends T> o6, Observable<? extends T> o7, Observable<? extends T> o8) {
         return create(OnSubscribeAmb.amb(o1, o2, o3, o4, o5, o6, o7, o8));
     }
 
@@ -490,7 +570,7 @@ public class Observable<T> {
      *         emitted an item or sent a termination notification
      * @see <a href="http://reactivex.io/documentation/operators/amb.html">ReactiveX operators documentation: Amb</a>
      */
-    public final static <T> Observable<T> amb(Observable<? extends T> o1, Observable<? extends T> o2, Observable<? extends T> o3, Observable<? extends T> o4, Observable<? extends T> o5, Observable<? extends T> o6, Observable<? extends T> o7, Observable<? extends T> o8, Observable<? extends T> o9) {
+    public static <T> Observable<T> amb(Observable<? extends T> o1, Observable<? extends T> o2, Observable<? extends T> o3, Observable<? extends T> o4, Observable<? extends T> o5, Observable<? extends T> o6, Observable<? extends T> o7, Observable<? extends T> o8, Observable<? extends T> o9) {
         return create(OnSubscribeAmb.amb(o1, o2, o3, o4, o5, o6, o7, o8, o9));
     }
 
@@ -516,8 +596,8 @@ public class Observable<T> {
      * @see <a href="http://reactivex.io/documentation/operators/combinelatest.html">ReactiveX operators documentation: CombineLatest</a>
      */
     @SuppressWarnings("unchecked")
-    public static final <T1, T2, R> Observable<R> combineLatest(Observable<? extends T1> o1, Observable<? extends T2> o2, Func2<? super T1, ? super T2, ? extends R> combineFunction) {
-        return combineLatest(Arrays.asList(o1, o2), Functions.fromFunc(combineFunction));
+    public static <T1, T2, R> Observable<R> combineLatest(Observable<? extends T1> o1, Observable<? extends T2> o2, Func2<? super T1, ? super T2, ? extends R> combineFunction) {
+        return (Observable<R>)combineLatest(Arrays.asList(o1, o2), Functions.fromFunc(combineFunction));
     }
 
     /**
@@ -544,8 +624,8 @@ public class Observable<T> {
      * @see <a href="http://reactivex.io/documentation/operators/combinelatest.html">ReactiveX operators documentation: CombineLatest</a>
      */
     @SuppressWarnings("unchecked")
-    public static final <T1, T2, T3, R> Observable<R> combineLatest(Observable<? extends T1> o1, Observable<? extends T2> o2, Observable<? extends T3> o3, Func3<? super T1, ? super T2, ? super T3, ? extends R> combineFunction) {
-        return combineLatest(Arrays.asList(o1, o2, o3), Functions.fromFunc(combineFunction));
+    public static <T1, T2, T3, R> Observable<R> combineLatest(Observable<? extends T1> o1, Observable<? extends T2> o2, Observable<? extends T3> o3, Func3<? super T1, ? super T2, ? super T3, ? extends R> combineFunction) {
+        return (Observable<R>)combineLatest(Arrays.asList(o1, o2, o3), Functions.fromFunc(combineFunction));
     }
 
     /**
@@ -574,9 +654,9 @@ public class Observable<T> {
      * @see <a href="http://reactivex.io/documentation/operators/combinelatest.html">ReactiveX operators documentation: CombineLatest</a>
      */
     @SuppressWarnings("unchecked")
-    public static final <T1, T2, T3, T4, R> Observable<R> combineLatest(Observable<? extends T1> o1, Observable<? extends T2> o2, Observable<? extends T3> o3, Observable<? extends T4> o4,
+    public static <T1, T2, T3, T4, R> Observable<R> combineLatest(Observable<? extends T1> o1, Observable<? extends T2> o2, Observable<? extends T3> o3, Observable<? extends T4> o4,
             Func4<? super T1, ? super T2, ? super T3, ? super T4, ? extends R> combineFunction) {
-        return combineLatest(Arrays.asList(o1, o2, o3, o4), Functions.fromFunc(combineFunction));
+        return (Observable<R>)combineLatest(Arrays.asList(o1, o2, o3, o4), Functions.fromFunc(combineFunction));
     }
 
     /**
@@ -607,9 +687,9 @@ public class Observable<T> {
      * @see <a href="http://reactivex.io/documentation/operators/combinelatest.html">ReactiveX operators documentation: CombineLatest</a>
      */
     @SuppressWarnings("unchecked")
-    public static final <T1, T2, T3, T4, T5, R> Observable<R> combineLatest(Observable<? extends T1> o1, Observable<? extends T2> o2, Observable<? extends T3> o3, Observable<? extends T4> o4, Observable<? extends T5> o5,
+    public static <T1, T2, T3, T4, T5, R> Observable<R> combineLatest(Observable<? extends T1> o1, Observable<? extends T2> o2, Observable<? extends T3> o3, Observable<? extends T4> o4, Observable<? extends T5> o5,
             Func5<? super T1, ? super T2, ? super T3, ? super T4, ? super T5, ? extends R> combineFunction) {
-        return combineLatest(Arrays.asList(o1, o2, o3, o4, o5), Functions.fromFunc(combineFunction));
+        return (Observable<R>)combineLatest(Arrays.asList(o1, o2, o3, o4, o5), Functions.fromFunc(combineFunction));
     }
 
     /**
@@ -642,9 +722,9 @@ public class Observable<T> {
      * @see <a href="http://reactivex.io/documentation/operators/combinelatest.html">ReactiveX operators documentation: CombineLatest</a>
      */
     @SuppressWarnings("unchecked")
-    public static final <T1, T2, T3, T4, T5, T6, R> Observable<R> combineLatest(Observable<? extends T1> o1, Observable<? extends T2> o2, Observable<? extends T3> o3, Observable<? extends T4> o4, Observable<? extends T5> o5, Observable<? extends T6> o6,
+    public static <T1, T2, T3, T4, T5, T6, R> Observable<R> combineLatest(Observable<? extends T1> o1, Observable<? extends T2> o2, Observable<? extends T3> o3, Observable<? extends T4> o4, Observable<? extends T5> o5, Observable<? extends T6> o6,
             Func6<? super T1, ? super T2, ? super T3, ? super T4, ? super T5, ? super T6, ? extends R> combineFunction) {
-        return combineLatest(Arrays.asList(o1, o2, o3, o4, o5, o6), Functions.fromFunc(combineFunction));
+        return (Observable<R>)combineLatest(Arrays.asList(o1, o2, o3, o4, o5, o6), Functions.fromFunc(combineFunction));
     }
 
     /**
@@ -679,9 +759,9 @@ public class Observable<T> {
      * @see <a href="http://reactivex.io/documentation/operators/combinelatest.html">ReactiveX operators documentation: CombineLatest</a>
      */
     @SuppressWarnings("unchecked")
-    public static final <T1, T2, T3, T4, T5, T6, T7, R> Observable<R> combineLatest(Observable<? extends T1> o1, Observable<? extends T2> o2, Observable<? extends T3> o3, Observable<? extends T4> o4, Observable<? extends T5> o5, Observable<? extends T6> o6, Observable<? extends T7> o7,
+    public static <T1, T2, T3, T4, T5, T6, T7, R> Observable<R> combineLatest(Observable<? extends T1> o1, Observable<? extends T2> o2, Observable<? extends T3> o3, Observable<? extends T4> o4, Observable<? extends T5> o5, Observable<? extends T6> o6, Observable<? extends T7> o7,
             Func7<? super T1, ? super T2, ? super T3, ? super T4, ? super T5, ? super T6, ? super T7, ? extends R> combineFunction) {
-        return combineLatest(Arrays.asList(o1, o2, o3, o4, o5, o6, o7), Functions.fromFunc(combineFunction));
+        return (Observable<R>)combineLatest(Arrays.asList(o1, o2, o3, o4, o5, o6, o7), Functions.fromFunc(combineFunction));
     }
 
     /**
@@ -718,9 +798,9 @@ public class Observable<T> {
      * @see <a href="http://reactivex.io/documentation/operators/combinelatest.html">ReactiveX operators documentation: CombineLatest</a>
      */
     @SuppressWarnings("unchecked")
-    public static final <T1, T2, T3, T4, T5, T6, T7, T8, R> Observable<R> combineLatest(Observable<? extends T1> o1, Observable<? extends T2> o2, Observable<? extends T3> o3, Observable<? extends T4> o4, Observable<? extends T5> o5, Observable<? extends T6> o6, Observable<? extends T7> o7, Observable<? extends T8> o8,
+    public static <T1, T2, T3, T4, T5, T6, T7, T8, R> Observable<R> combineLatest(Observable<? extends T1> o1, Observable<? extends T2> o2, Observable<? extends T3> o3, Observable<? extends T4> o4, Observable<? extends T5> o5, Observable<? extends T6> o6, Observable<? extends T7> o7, Observable<? extends T8> o8,
             Func8<? super T1, ? super T2, ? super T3, ? super T4, ? super T5, ? super T6, ? super T7, ? super T8, ? extends R> combineFunction) {
-        return combineLatest(Arrays.asList(o1, o2, o3, o4, o5, o6, o7, o8), Functions.fromFunc(combineFunction));
+        return (Observable<R>)combineLatest(Arrays.asList(o1, o2, o3, o4, o5, o6, o7, o8), Functions.fromFunc(combineFunction));
     }
 
     /**
@@ -759,10 +839,10 @@ public class Observable<T> {
      * @see <a href="http://reactivex.io/documentation/operators/combinelatest.html">ReactiveX operators documentation: CombineLatest</a>
      */
     @SuppressWarnings("unchecked")
-    public static final <T1, T2, T3, T4, T5, T6, T7, T8, T9, R> Observable<R> combineLatest(Observable<? extends T1> o1, Observable<? extends T2> o2, Observable<? extends T3> o3, Observable<? extends T4> o4, Observable<? extends T5> o5, Observable<? extends T6> o6, Observable<? extends T7> o7, Observable<? extends T8> o8,
+    public static <T1, T2, T3, T4, T5, T6, T7, T8, T9, R> Observable<R> combineLatest(Observable<? extends T1> o1, Observable<? extends T2> o2, Observable<? extends T3> o3, Observable<? extends T4> o4, Observable<? extends T5> o5, Observable<? extends T6> o6, Observable<? extends T7> o7, Observable<? extends T8> o8,
             Observable<? extends T9> o9,
             Func9<? super T1, ? super T2, ? super T3, ? super T4, ? super T5, ? super T6, ? super T7, ? super T8, ? super T9, ? extends R> combineFunction) {
-        return combineLatest(Arrays.asList(o1, o2, o3, o4, o5, o6, o7, o8, o9), Functions.fromFunc(combineFunction));
+        return (Observable<R>)combineLatest(Arrays.asList(o1, o2, o3, o4, o5, o6, o7, o8, o9), Functions.fromFunc(combineFunction));
     }
     /**
      * Combines a list of source Observables by emitting an item that aggregates the latest values of each of
@@ -785,8 +865,60 @@ public class Observable<T> {
      *         Observables by means of the given aggregation function
      * @see <a href="http://reactivex.io/documentation/operators/combinelatest.html">ReactiveX operators documentation: CombineLatest</a>
      */
-    public static final <T, R> Observable<R> combineLatest(List<? extends Observable<? extends T>> sources, FuncN<? extends R> combineFunction) {
+    public static <T, R> Observable<R> combineLatest(List<? extends Observable<? extends T>> sources, FuncN<? extends R> combineFunction) {
         return create(new OnSubscribeCombineLatest<T, R>(sources, combineFunction));
+    }
+
+    /**
+     * Combines a collection of source Observables by emitting an item that aggregates the latest values of each of
+     * the source Observables each time an item is received from any of the source Observables, where this
+     * aggregation is defined by a specified function.
+     * <dl>
+     *  <dt><b>Scheduler:</b></dt>
+     *  <dd>{@code combineLatest} does not operate by default on a particular {@link Scheduler}.</dd>
+     * </dl>
+     *
+     * @param <T>
+     *            the common base type of source values
+     * @param <R>
+     *            the result type
+     * @param sources
+     *            the collection of source Observables
+     * @param combineFunction
+     *            the aggregation function used to combine the items emitted by the source Observables
+     * @return an Observable that emits items that are the result of combining the items emitted by the source
+     *         Observables by means of the given aggregation function
+     * @see <a href="http://reactivex.io/documentation/operators/combinelatest.html">ReactiveX operators documentation: CombineLatest</a>
+     */
+    public static <T, R> Observable<R> combineLatest(Iterable<? extends Observable<? extends T>> sources, FuncN<? extends R> combineFunction) {
+        return create(new OnSubscribeCombineLatest<T, R>(sources, combineFunction));
+    }
+
+    /**
+     * Combines a collection of source Observables by emitting an item that aggregates the latest values of each of
+     * the source Observables each time an item is received from any of the source Observables, where this
+     * aggregation is defined by a specified function and delays any error from the sources until
+     * all source Observables terminate.
+     * 
+     * <dl>
+     *  <dt><b>Scheduler:</b></dt>
+     *  <dd>{@code combineLatest} does not operate by default on a particular {@link Scheduler}.</dd>
+     * </dl>
+     *
+     * @param <T>
+     *            the common base type of source values
+     * @param <R>
+     *            the result type
+     * @param sources
+     *            the collection of source Observables
+     * @param combineFunction
+     *            the aggregation function used to combine the items emitted by the source Observables
+     * @return an Observable that emits items that are the result of combining the items emitted by the source
+     *         Observables by means of the given aggregation function
+     * @see <a href="http://reactivex.io/documentation/operators/combinelatest.html">ReactiveX operators documentation: CombineLatest</a>
+     */
+    public static <T, R> Observable<R> combineLatestDelayError(Iterable<? extends Observable<? extends T>> sources, FuncN<? extends R> combineFunction) {
+        return create(new OnSubscribeCombineLatest<T, R>(null, sources, combineFunction, RxRingBuffer.SIZE, true));
     }
 
     /**
@@ -805,8 +937,9 @@ public class Observable<T> {
      *         {@code observables}, one after the other, without interleaving them
      * @see <a href="http://reactivex.io/documentation/operators/concat.html">ReactiveX operators documentation: Concat</a>
      */
-    public final static <T> Observable<T> concat(Observable<? extends Observable<? extends T>> observables) {
-        return observables.lift(OperatorConcat.<T>instance());
+    @SuppressWarnings({ "unchecked", "rawtypes" })
+    public static <T> Observable<T> concat(Observable<? extends Observable<? extends T>> observables) {
+        return observables.concatMap((Func1)UtilityFunctions.identity());
     }
 
     /**
@@ -827,7 +960,7 @@ public class Observable<T> {
      *         without interleaving them
      * @see <a href="http://reactivex.io/documentation/operators/concat.html">ReactiveX operators documentation: Concat</a>
      */
-    public final static <T> Observable<T> concat(Observable<? extends T> t1, Observable<? extends T> t2) {
+    public static <T> Observable<T> concat(Observable<? extends T> t1, Observable<? extends T> t2) {
         return concat(just(t1, t2));
     }
 
@@ -851,7 +984,7 @@ public class Observable<T> {
      *         without interleaving them
      * @see <a href="http://reactivex.io/documentation/operators/concat.html">ReactiveX operators documentation: Concat</a>
      */
-    public final static <T> Observable<T> concat(Observable<? extends T> t1, Observable<? extends T> t2, Observable<? extends T> t3) {
+    public static <T> Observable<T> concat(Observable<? extends T> t1, Observable<? extends T> t2, Observable<? extends T> t3) {
         return concat(just(t1, t2, t3));
     }
 
@@ -877,7 +1010,7 @@ public class Observable<T> {
      *         without interleaving them
      * @see <a href="http://reactivex.io/documentation/operators/concat.html">ReactiveX operators documentation: Concat</a>
      */
-    public final static <T> Observable<T> concat(Observable<? extends T> t1, Observable<? extends T> t2, Observable<? extends T> t3, Observable<? extends T> t4) {
+    public static <T> Observable<T> concat(Observable<? extends T> t1, Observable<? extends T> t2, Observable<? extends T> t3, Observable<? extends T> t4) {
         return concat(just(t1, t2, t3, t4));
     }
 
@@ -905,7 +1038,7 @@ public class Observable<T> {
      *         without interleaving them
      * @see <a href="http://reactivex.io/documentation/operators/concat.html">ReactiveX operators documentation: Concat</a>
      */
-    public final static <T> Observable<T> concat(Observable<? extends T> t1, Observable<? extends T> t2, Observable<? extends T> t3, Observable<? extends T> t4, Observable<? extends T> t5) {
+    public static <T> Observable<T> concat(Observable<? extends T> t1, Observable<? extends T> t2, Observable<? extends T> t3, Observable<? extends T> t4, Observable<? extends T> t5) {
         return concat(just(t1, t2, t3, t4, t5));
     }
 
@@ -935,7 +1068,7 @@ public class Observable<T> {
      *         without interleaving them
      * @see <a href="http://reactivex.io/documentation/operators/concat.html">ReactiveX operators documentation: Concat</a>
      */
-    public final static <T> Observable<T> concat(Observable<? extends T> t1, Observable<? extends T> t2, Observable<? extends T> t3, Observable<? extends T> t4, Observable<? extends T> t5, Observable<? extends T> t6) {
+    public static <T> Observable<T> concat(Observable<? extends T> t1, Observable<? extends T> t2, Observable<? extends T> t3, Observable<? extends T> t4, Observable<? extends T> t5, Observable<? extends T> t6) {
         return concat(just(t1, t2, t3, t4, t5, t6));
     }
 
@@ -967,7 +1100,7 @@ public class Observable<T> {
      *         without interleaving them
      * @see <a href="http://reactivex.io/documentation/operators/concat.html">ReactiveX operators documentation: Concat</a>
      */
-    public final static <T> Observable<T> concat(Observable<? extends T> t1, Observable<? extends T> t2, Observable<? extends T> t3, Observable<? extends T> t4, Observable<? extends T> t5, Observable<? extends T> t6, Observable<? extends T> t7) {
+    public static <T> Observable<T> concat(Observable<? extends T> t1, Observable<? extends T> t2, Observable<? extends T> t3, Observable<? extends T> t4, Observable<? extends T> t5, Observable<? extends T> t6, Observable<? extends T> t7) {
         return concat(just(t1, t2, t3, t4, t5, t6, t7));
     }
 
@@ -1001,7 +1134,7 @@ public class Observable<T> {
      *         without interleaving them
      * @see <a href="http://reactivex.io/documentation/operators/concat.html">ReactiveX operators documentation: Concat</a>
      */
-    public final static <T> Observable<T> concat(Observable<? extends T> t1, Observable<? extends T> t2, Observable<? extends T> t3, Observable<? extends T> t4, Observable<? extends T> t5, Observable<? extends T> t6, Observable<? extends T> t7, Observable<? extends T> t8) {
+    public static <T> Observable<T> concat(Observable<? extends T> t1, Observable<? extends T> t2, Observable<? extends T> t3, Observable<? extends T> t4, Observable<? extends T> t5, Observable<? extends T> t6, Observable<? extends T> t7, Observable<? extends T> t8) {
         return concat(just(t1, t2, t3, t4, t5, t6, t7, t8));
     }
 
@@ -1037,8 +1170,47 @@ public class Observable<T> {
      *         without interleaving them
      * @see <a href="http://reactivex.io/documentation/operators/concat.html">ReactiveX operators documentation: Concat</a>
      */
-    public final static <T> Observable<T> concat(Observable<? extends T> t1, Observable<? extends T> t2, Observable<? extends T> t3, Observable<? extends T> t4, Observable<? extends T> t5, Observable<? extends T> t6, Observable<? extends T> t7, Observable<? extends T> t8, Observable<? extends T> t9) {
+    public static <T> Observable<T> concat(Observable<? extends T> t1, Observable<? extends T> t2, Observable<? extends T> t3, Observable<? extends T> t4, Observable<? extends T> t5, Observable<? extends T> t6, Observable<? extends T> t7, Observable<? extends T> t8, Observable<? extends T> t9) {
         return concat(just(t1, t2, t3, t4, t5, t6, t7, t8, t9));
+    }
+
+    /**
+     * Concatenates the Observable sequence of Observables into a single sequence by subscribing to each inner Observable,
+     * one after the other, one at a time and delays any errors till the all inner and the outer Observables terminate.
+     * 
+     * <dl>
+     *  <dt><b>Backpressure:</b></dt>
+     *  <dd>{@code concatDelayError} fully supports backpressure.</dd>
+     *  <dt><b>Scheduler:</b></dt>
+     *  <dd>{@code concatDelayError} does not operate by default on a particular {@link Scheduler}.</dd>
+     * </dl>
+     * 
+     * @param sources the Observable sequence of Observables
+     * @return the new Observable with the concatenating behavior
+     */
+    @SuppressWarnings({ "rawtypes", "unchecked" })
+    @Experimental
+    public static <T> Observable<T> concatDelayError(Observable<? extends Observable<? extends T>> sources) {
+        return sources.concatMapDelayError((Func1)UtilityFunctions.identity());
+    }
+
+    /**
+     * Concatenates the Iterable sequence of Observables into a single sequence by subscribing to each Observable,
+     * one after the other, one at a time and delays any errors till the all inner Observables terminate.
+     * 
+     * <dl>
+     *  <dt><b>Backpressure:</b></dt>
+     *  <dd>{@code concatDelayError} fully supports backpressure.</dd>
+     *  <dt><b>Scheduler:</b></dt>
+     *  <dd>{@code concatDelayError} does not operate by default on a particular {@link Scheduler}.</dd>
+     * </dl>
+     * 
+     * @param sources the Iterable sequence of Observables
+     * @return the new Observable with the concatenating behavior
+     */
+    @Experimental
+    public static <T> Observable<T> concatDelayError(Iterable<? extends Observable<? extends T>> sources) {
+        return concatDelayError(from(sources));
     }
 
     /**
@@ -1065,20 +1237,10 @@ public class Observable<T> {
      *         Observable factory function
      * @see <a href="http://reactivex.io/documentation/operators/defer.html">ReactiveX operators documentation: Defer</a>
      */
-    public final static <T> Observable<T> defer(Func0<Observable<T>> observableFactory) {
+    public static <T> Observable<T> defer(Func0<Observable<T>> observableFactory) {
         return create(new OnSubscribeDefer<T>(observableFactory));
     }
 
-    /** Lazy initialized Holder for an empty observable which just emits onCompleted to any subscriber. */
-    private static final class EmptyHolder {
-        final static Observable<Object> INSTANCE = create(new OnSubscribe<Object>() {
-            @Override
-            public void call(Subscriber<? super Object> subscriber) {
-                subscriber.onCompleted();
-            }
-        });
-    }
-    
     /**
      * Returns an Observable that emits no items to the {@link Observer} and immediately invokes its
      * {@link Observer#onCompleted onCompleted} method.
@@ -1095,9 +1257,8 @@ public class Observable<T> {
      *         {@link Observer}'s {@link Observer#onCompleted() onCompleted} method
      * @see <a href="http://reactivex.io/documentation/operators/empty-never-throw.html">ReactiveX operators documentation: Empty</a>
      */
-    @SuppressWarnings("unchecked")
-    public final static <T> Observable<T> empty() {
-        return (Observable<T>) EmptyHolder.INSTANCE;
+    public static <T> Observable<T> empty() {
+        return EmptyObservableHolder.instance();
     }
 
     /**
@@ -1118,8 +1279,8 @@ public class Observable<T> {
      *         the Observer subscribes to it
      * @see <a href="http://reactivex.io/documentation/operators/empty-never-throw.html">ReactiveX operators documentation: Throw</a>
      */
-    public final static <T> Observable<T> error(Throwable exception) {
-        return new ThrowObservable<T>(exception);
+    public static <T> Observable<T> error(Throwable exception) {
+        return create(new OnSubscribeThrow<T>(exception));
     }
 
     /**
@@ -1145,8 +1306,8 @@ public class Observable<T> {
      * @return an Observable that emits the item from the source {@link Future}
      * @see <a href="http://reactivex.io/documentation/operators/from.html">ReactiveX operators documentation: From</a>
      */
-    public final static <T> Observable<T> from(Future<? extends T> future) {
-        return create(OnSubscribeToObservableFuture.toObservableFuture(future));
+    public static <T> Observable<T> from(Future<? extends T> future) {
+        return (Observable<T>)create(OnSubscribeToObservableFuture.toObservableFuture(future));
     }
 
     /**
@@ -1176,8 +1337,8 @@ public class Observable<T> {
      * @return an Observable that emits the item from the source {@link Future}
      * @see <a href="http://reactivex.io/documentation/operators/from.html">ReactiveX operators documentation: From</a>
      */
-    public final static <T> Observable<T> from(Future<? extends T> future, long timeout, TimeUnit unit) {
-        return create(OnSubscribeToObservableFuture.toObservableFuture(future, timeout, unit));
+    public static <T> Observable<T> from(Future<? extends T> future, long timeout, TimeUnit unit) {
+        return (Observable<T>)create(OnSubscribeToObservableFuture.toObservableFuture(future, timeout, unit));
     }
 
     /**
@@ -1204,9 +1365,10 @@ public class Observable<T> {
      * @return an Observable that emits the item from the source {@link Future}
      * @see <a href="http://reactivex.io/documentation/operators/from.html">ReactiveX operators documentation: From</a>
      */
-    public final static <T> Observable<T> from(Future<? extends T> future, Scheduler scheduler) {
+    public static <T> Observable<T> from(Future<? extends T> future, Scheduler scheduler) {
         // TODO in a future revision the Scheduler will become important because we'll start polling instead of blocking on the Future
-        return create(OnSubscribeToObservableFuture.toObservableFuture(future)).subscribeOn(scheduler);
+        Observable<T> o = (Observable<T>)create(OnSubscribeToObservableFuture.toObservableFuture(future));
+        return o.subscribeOn(scheduler);
     }
 
     /**
@@ -1226,7 +1388,7 @@ public class Observable<T> {
      * @return an Observable that emits each item in the source {@link Iterable} sequence
      * @see <a href="http://reactivex.io/documentation/operators/from.html">ReactiveX operators documentation: From</a>
      */
-    public final static <T> Observable<T> from(Iterable<? extends T> iterable) {
+    public static <T> Observable<T> from(Iterable<? extends T> iterable) {
         return create(new OnSubscribeFromIterable<T>(iterable));
     }
 
@@ -1246,29 +1408,40 @@ public class Observable<T> {
      * @return an Observable that emits each item in the source Array
      * @see <a href="http://reactivex.io/documentation/operators/from.html">ReactiveX operators documentation: From</a>
      */
-    public final static <T> Observable<T> from(T[] array) {
-        return from(Arrays.asList(array));
+    public static <T> Observable<T> from(T[] array) {
+        int n = array.length;
+        if (n == 0) {
+            return empty();
+        } else
+        if (n == 1) {
+            return just(array[0]);
+        }
+        return create(new OnSubscribeFromArray<T>(array));
     }
 
     /**
-     * Returns an Observable that invokes passed function and emits its result for each new Observer that subscribes.
+     * Returns an Observable that, when an observer subscribes to it, invokes a function you specify and then
+     * emits the value returned from that function.
      * <p>
-     * Allows you to defer execution of passed function until Observer subscribes to the Observable.
-     * It makes passed function "lazy".
-     * Result of the function invocation will be emitted by the Observable.
+     * <img width="640" height="195" src="https://raw.github.com/wiki/ReactiveX/RxJava/images/rx-operators/fromCallable.png" alt="">
+     * <p>
+     * This allows you to defer the execution of the function you specify until an observer subscribes to the
+     * Observable. That is to say, it makes the function "lazy."
      * <dl>
      *   <dt><b>Scheduler:</b></dt>
      *   <dd>{@code fromCallable} does not operate by default on a particular {@link Scheduler}.</dd>
      * </dl>
      *
      * @param func
-     *         function which execution should be deferred, it will be invoked when Observer will subscribe to the Observable
+     *         a function, the execution of which should be deferred; {@code fromCallable} will invoke this
+     *         function only when an observer subscribes to the Observable that {@code fromCallable} returns
      * @param <T>
      *         the type of the item emitted by the Observable
      * @return an Observable whose {@link Observer}s' subscriptions trigger an invocation of the given function
      * @see #defer(Func0)
+     * @since (if this graduates from Experimental/Beta to supported, replace this parenthetical with the release number)
      */
-    @Experimental
+    @Beta
     public static <T> Observable<T> fromCallable(Callable<? extends T> func) {
         return create(new OnSubscribeFromCallable<T>(func));
     }
@@ -1289,7 +1462,7 @@ public class Observable<T> {
      * @return an Observable that emits a sequential number each time interval
      * @see <a href="http://reactivex.io/documentation/operators/interval.html">ReactiveX operators documentation: Interval</a>
      */
-    public final static Observable<Long> interval(long interval, TimeUnit unit) {
+    public static Observable<Long> interval(long interval, TimeUnit unit) {
         return interval(interval, interval, unit, Schedulers.computation());
     }
 
@@ -1312,7 +1485,7 @@ public class Observable<T> {
      * @return an Observable that emits a sequential number each time interval
      * @see <a href="http://reactivex.io/documentation/operators/interval.html">ReactiveX operators documentation: Interval</a>
      */
-    public final static Observable<Long> interval(long interval, TimeUnit unit, Scheduler scheduler) {
+    public static Observable<Long> interval(long interval, TimeUnit unit, Scheduler scheduler) {
         return interval(interval, interval, unit, scheduler);
     }
 
@@ -1326,7 +1499,7 @@ public class Observable<T> {
      *  <dd>This operator does not support backpressure as it uses time. If the downstream needs a slower rate
      *      it should slow the timer or use something like {@link #onBackpressureDrop}.</dd>
      *  <dt><b>Scheduler:</b></dt>
-     *  <dd>{@code timer} operates by default on the {@code computation} {@link Scheduler}.</dd>
+     *  <dd>{@code interval} operates by default on the {@code computation} {@link Scheduler}.</dd>
      * </dl>
      * 
      * @param initialDelay
@@ -1340,7 +1513,7 @@ public class Observable<T> {
      * @see <a href="http://reactivex.io/documentation/operators/interval.html">ReactiveX operators documentation: Interval</a>
      * @since 1.0.12
      */
-    public final static Observable<Long> interval(long initialDelay, long period, TimeUnit unit) {
+    public static Observable<Long> interval(long initialDelay, long period, TimeUnit unit) {
         return interval(initialDelay, period, unit, Schedulers.computation());
     }
 
@@ -1370,7 +1543,7 @@ public class Observable<T> {
      * @see <a href="http://reactivex.io/documentation/operators/interval.html">ReactiveX operators documentation: Interval</a>
      * @since 1.0.12
      */
-    public final static Observable<Long> interval(long initialDelay, long period, TimeUnit unit, Scheduler scheduler) {
+    public static Observable<Long> interval(long initialDelay, long period, TimeUnit unit, Scheduler scheduler) {
         return create(new OnSubscribeTimerPeriodically(initialDelay, period, unit, scheduler));
     }
 
@@ -1398,7 +1571,7 @@ public class Observable<T> {
      * @return an Observable that emits {@code value} as a single item and then completes
      * @see <a href="http://reactivex.io/documentation/operators/just.html">ReactiveX operators documentation: Just</a>
      */
-    public final static <T> Observable<T> just(final T value) {
+    public static <T> Observable<T> just(final T value) {
         return ScalarSynchronousObservable.create(value);
     }
     
@@ -1422,8 +1595,8 @@ public class Observable<T> {
      */
     // suppress unchecked because we are using varargs inside the method
     @SuppressWarnings("unchecked")
-    public final static <T> Observable<T> just(T t1, T t2) {
-        return from(Arrays.asList(t1, t2));
+    public static <T> Observable<T> just(T t1, T t2) {
+        return from((T[])new Object[] { t1, t2 });
     }
 
     /**
@@ -1448,8 +1621,8 @@ public class Observable<T> {
      */
     // suppress unchecked because we are using varargs inside the method
     @SuppressWarnings("unchecked")
-    public final static <T> Observable<T> just(T t1, T t2, T t3) {
-        return from(Arrays.asList(t1, t2, t3));
+    public static <T> Observable<T> just(T t1, T t2, T t3) {
+        return from((T[])new Object[] { t1, t2, t3 });
     }
 
     /**
@@ -1476,8 +1649,8 @@ public class Observable<T> {
      */
     // suppress unchecked because we are using varargs inside the method
     @SuppressWarnings("unchecked")
-    public final static <T> Observable<T> just(T t1, T t2, T t3, T t4) {
-        return from(Arrays.asList(t1, t2, t3, t4));
+    public static <T> Observable<T> just(T t1, T t2, T t3, T t4) {
+        return from((T[])new Object[] { t1, t2, t3, t4 });
     }
 
     /**
@@ -1506,8 +1679,8 @@ public class Observable<T> {
      */
     // suppress unchecked because we are using varargs inside the method
     @SuppressWarnings("unchecked")
-    public final static <T> Observable<T> just(T t1, T t2, T t3, T t4, T t5) {
-        return from(Arrays.asList(t1, t2, t3, t4, t5));
+    public static <T> Observable<T> just(T t1, T t2, T t3, T t4, T t5) {
+        return from((T[])new Object[] { t1, t2, t3, t4, t5 });
     }
 
     /**
@@ -1538,8 +1711,8 @@ public class Observable<T> {
      */
     // suppress unchecked because we are using varargs inside the method
     @SuppressWarnings("unchecked")
-    public final static <T> Observable<T> just(T t1, T t2, T t3, T t4, T t5, T t6) {
-        return from(Arrays.asList(t1, t2, t3, t4, t5, t6));
+    public static <T> Observable<T> just(T t1, T t2, T t3, T t4, T t5, T t6) {
+        return from((T[])new Object[] { t1, t2, t3, t4, t5, t6 });
     }
 
     /**
@@ -1572,8 +1745,8 @@ public class Observable<T> {
      */
     // suppress unchecked because we are using varargs inside the method
     @SuppressWarnings("unchecked")
-    public final static <T> Observable<T> just(T t1, T t2, T t3, T t4, T t5, T t6, T t7) {
-        return from(Arrays.asList(t1, t2, t3, t4, t5, t6, t7));
+    public static <T> Observable<T> just(T t1, T t2, T t3, T t4, T t5, T t6, T t7) {
+        return from((T[])new Object[] { t1, t2, t3, t4, t5, t6, t7 });
     }
 
     /**
@@ -1608,8 +1781,8 @@ public class Observable<T> {
      */
     // suppress unchecked because we are using varargs inside the method
     @SuppressWarnings("unchecked")
-    public final static <T> Observable<T> just(T t1, T t2, T t3, T t4, T t5, T t6, T t7, T t8) {
-        return from(Arrays.asList(t1, t2, t3, t4, t5, t6, t7, t8));
+    public static <T> Observable<T> just(T t1, T t2, T t3, T t4, T t5, T t6, T t7, T t8) {
+        return from((T[])new Object[] { t1, t2, t3, t4, t5, t6, t7, t8 });
     }
 
     /**
@@ -1646,8 +1819,8 @@ public class Observable<T> {
      */
     // suppress unchecked because we are using varargs inside the method
     @SuppressWarnings("unchecked")
-    public final static <T> Observable<T> just(T t1, T t2, T t3, T t4, T t5, T t6, T t7, T t8, T t9) {
-        return from(Arrays.asList(t1, t2, t3, t4, t5, t6, t7, t8, t9));
+    public static <T> Observable<T> just(T t1, T t2, T t3, T t4, T t5, T t6, T t7, T t8, T t9) {
+        return from((T[])new Object[] { t1, t2, t3, t4, t5, t6, t7, t8, t9 });
     }
 
     /**
@@ -1686,8 +1859,8 @@ public class Observable<T> {
      */
     // suppress unchecked because we are using varargs inside the method
     @SuppressWarnings("unchecked")
-    public final static <T> Observable<T> just(T t1, T t2, T t3, T t4, T t5, T t6, T t7, T t8, T t9, T t10) {
-        return from(Arrays.asList(t1, t2, t3, t4, t5, t6, t7, t8, t9, t10));
+    public static <T> Observable<T> just(T t1, T t2, T t3, T t4, T t5, T t6, T t7, T t8, T t9, T t10) {
+        return from((T[])new Object[] { t1, t2, t3, t4, t5, t6, t7, t8, t9, t10 });
     }
     
     /**
@@ -1708,7 +1881,7 @@ public class Observable<T> {
      *         Observables in the Iterable
      * @see <a href="http://reactivex.io/documentation/operators/merge.html">ReactiveX operators documentation: Merge</a>
      */
-    public final static <T> Observable<T> merge(Iterable<? extends Observable<? extends T>> sequences) {
+    public static <T> Observable<T> merge(Iterable<? extends Observable<? extends T>> sequences) {
         return merge(from(sequences));
     }
 
@@ -1735,7 +1908,7 @@ public class Observable<T> {
      *             if {@code maxConcurrent} is less than or equal to 0
      * @see <a href="http://reactivex.io/documentation/operators/merge.html">ReactiveX operators documentation: Merge</a>
      */
-    public final static <T> Observable<T> merge(Iterable<? extends Observable<? extends T>> sequences, int maxConcurrent) {
+    public static <T> Observable<T> merge(Iterable<? extends Observable<? extends T>> sequences, int maxConcurrent) {
         return merge(from(sequences), maxConcurrent);
     }
 
@@ -1759,7 +1932,7 @@ public class Observable<T> {
      * @see <a href="http://reactivex.io/documentation/operators/merge.html">ReactiveX operators documentation: Merge</a>
      */
     @SuppressWarnings({"unchecked", "rawtypes"})
-    public final static <T> Observable<T> merge(Observable<? extends Observable<? extends T>> source) {
+    public static <T> Observable<T> merge(Observable<? extends Observable<? extends T>> source) {
         if (source.getClass() == ScalarSynchronousObservable.class) {
             return ((ScalarSynchronousObservable<T>)source).scalarFlatMap((Func1)UtilityFunctions.identity());
         }
@@ -1789,11 +1962,10 @@ public class Observable<T> {
      * @throws IllegalArgumentException
      *             if {@code maxConcurrent} is less than or equal to 0
      * @see <a href="http://reactivex.io/documentation/operators/merge.html">ReactiveX operators documentation: Merge</a>
-     * @since (if this graduates from Experimental/Beta to supported, replace this parenthetical with the release number)
+     * @since 1.1.0
      */
-    @Experimental
     @SuppressWarnings({"unchecked", "rawtypes"})
-    public final static <T> Observable<T> merge(Observable<? extends Observable<? extends T>> source, int maxConcurrent) {
+    public static <T> Observable<T> merge(Observable<? extends Observable<? extends T>> source, int maxConcurrent) {
         if (source.getClass() == ScalarSynchronousObservable.class) {
             return ((ScalarSynchronousObservable<T>)source).scalarFlatMap((Func1)UtilityFunctions.identity());
         }
@@ -1820,8 +1992,8 @@ public class Observable<T> {
      * @see <a href="http://reactivex.io/documentation/operators/merge.html">ReactiveX operators documentation: Merge</a>
      */
     @SuppressWarnings("unchecked")
-    public final static <T> Observable<T> merge(Observable<? extends T> t1, Observable<? extends T> t2) {
-        return merge(from(Arrays.asList(t1, t2)));
+    public static <T> Observable<T> merge(Observable<? extends T> t1, Observable<? extends T> t2) {
+        return merge(new Observable[] { t1, t2 });
     }
 
     /**
@@ -1846,8 +2018,8 @@ public class Observable<T> {
      * @see <a href="http://reactivex.io/documentation/operators/merge.html">ReactiveX operators documentation: Merge</a>
      */
     @SuppressWarnings("unchecked")
-    public final static <T> Observable<T> merge(Observable<? extends T> t1, Observable<? extends T> t2, Observable<? extends T> t3) {
-        return merge(from(Arrays.asList(t1, t2, t3)));
+    public static <T> Observable<T> merge(Observable<? extends T> t1, Observable<? extends T> t2, Observable<? extends T> t3) {
+        return merge(new Observable[] { t1, t2, t3 });
     }
 
     /**
@@ -1874,8 +2046,8 @@ public class Observable<T> {
      * @see <a href="http://reactivex.io/documentation/operators/merge.html">ReactiveX operators documentation: Merge</a>
      */
     @SuppressWarnings("unchecked")
-    public final static <T> Observable<T> merge(Observable<? extends T> t1, Observable<? extends T> t2, Observable<? extends T> t3, Observable<? extends T> t4) {
-        return merge(from(Arrays.asList(t1, t2, t3, t4)));
+    public static <T> Observable<T> merge(Observable<? extends T> t1, Observable<? extends T> t2, Observable<? extends T> t3, Observable<? extends T> t4) {
+        return merge(new Observable[] { t1, t2, t3, t4 });
     }
 
     /**
@@ -1904,8 +2076,8 @@ public class Observable<T> {
      * @see <a href="http://reactivex.io/documentation/operators/merge.html">ReactiveX operators documentation: Merge</a>
      */
     @SuppressWarnings("unchecked")
-    public final static <T> Observable<T> merge(Observable<? extends T> t1, Observable<? extends T> t2, Observable<? extends T> t3, Observable<? extends T> t4, Observable<? extends T> t5) {
-        return merge(from(Arrays.asList(t1, t2, t3, t4, t5)));
+    public static <T> Observable<T> merge(Observable<? extends T> t1, Observable<? extends T> t2, Observable<? extends T> t3, Observable<? extends T> t4, Observable<? extends T> t5) {
+        return merge(new Observable[] { t1, t2, t3, t4, t5 });
     }
 
     /**
@@ -1936,8 +2108,8 @@ public class Observable<T> {
      * @see <a href="http://reactivex.io/documentation/operators/merge.html">ReactiveX operators documentation: Merge</a>
      */
     @SuppressWarnings("unchecked")
-    public final static <T> Observable<T> merge(Observable<? extends T> t1, Observable<? extends T> t2, Observable<? extends T> t3, Observable<? extends T> t4, Observable<? extends T> t5, Observable<? extends T> t6) {
-        return merge(from(Arrays.asList(t1, t2, t3, t4, t5, t6)));
+    public static <T> Observable<T> merge(Observable<? extends T> t1, Observable<? extends T> t2, Observable<? extends T> t3, Observable<? extends T> t4, Observable<? extends T> t5, Observable<? extends T> t6) {
+        return merge(new Observable[] { t1, t2, t3, t4, t5, t6 });
     }
 
     /**
@@ -1970,8 +2142,8 @@ public class Observable<T> {
      * @see <a href="http://reactivex.io/documentation/operators/merge.html">ReactiveX operators documentation: Merge</a>
      */
     @SuppressWarnings("unchecked")
-    public final static <T> Observable<T> merge(Observable<? extends T> t1, Observable<? extends T> t2, Observable<? extends T> t3, Observable<? extends T> t4, Observable<? extends T> t5, Observable<? extends T> t6, Observable<? extends T> t7) {
-        return merge(from(Arrays.asList(t1, t2, t3, t4, t5, t6, t7)));
+    public static <T> Observable<T> merge(Observable<? extends T> t1, Observable<? extends T> t2, Observable<? extends T> t3, Observable<? extends T> t4, Observable<? extends T> t5, Observable<? extends T> t6, Observable<? extends T> t7) {
+        return merge(new Observable[] { t1, t2, t3, t4, t5, t6, t7 });
     }
 
     /**
@@ -2006,8 +2178,8 @@ public class Observable<T> {
      * @see <a href="http://reactivex.io/documentation/operators/merge.html">ReactiveX operators documentation: Merge</a>
      */
     @SuppressWarnings("unchecked")
-    public final static <T> Observable<T> merge(Observable<? extends T> t1, Observable<? extends T> t2, Observable<? extends T> t3, Observable<? extends T> t4, Observable<? extends T> t5, Observable<? extends T> t6, Observable<? extends T> t7, Observable<? extends T> t8) {
-        return merge(from(Arrays.asList(t1, t2, t3, t4, t5, t6, t7, t8)));
+    public static <T> Observable<T> merge(Observable<? extends T> t1, Observable<? extends T> t2, Observable<? extends T> t3, Observable<? extends T> t4, Observable<? extends T> t5, Observable<? extends T> t6, Observable<? extends T> t7, Observable<? extends T> t8) {
+        return merge(new Observable[] { t1, t2, t3, t4, t5, t6, t7, t8 });
     }
 
     /**
@@ -2044,8 +2216,8 @@ public class Observable<T> {
      * @see <a href="http://reactivex.io/documentation/operators/merge.html">ReactiveX operators documentation: Merge</a>
      */
     @SuppressWarnings("unchecked")
-    public final static <T> Observable<T> merge(Observable<? extends T> t1, Observable<? extends T> t2, Observable<? extends T> t3, Observable<? extends T> t4, Observable<? extends T> t5, Observable<? extends T> t6, Observable<? extends T> t7, Observable<? extends T> t8, Observable<? extends T> t9) {
-        return merge(from(Arrays.asList(t1, t2, t3, t4, t5, t6, t7, t8, t9)));
+    public static <T> Observable<T> merge(Observable<? extends T> t1, Observable<? extends T> t2, Observable<? extends T> t3, Observable<? extends T> t4, Observable<? extends T> t5, Observable<? extends T> t6, Observable<? extends T> t7, Observable<? extends T> t8, Observable<? extends T> t9) {
+        return merge(new Observable[] { t1, t2, t3, t4, t5, t6, t7, t8, t9 });
     }
 
     /**
@@ -2065,7 +2237,7 @@ public class Observable<T> {
      * @return an Observable that emits all of the items emitted by the Observables in the Array
      * @see <a href="http://reactivex.io/documentation/operators/merge.html">ReactiveX operators documentation: Merge</a>
      */
-    public final static <T> Observable<T> merge(Observable<? extends T>[] sequences) {
+    public static <T> Observable<T> merge(Observable<? extends T>[] sequences) {
         return merge(from(sequences));
     }
     
@@ -2088,10 +2260,9 @@ public class Observable<T> {
      *            the maximum number of Observables that may be subscribed to concurrently
      * @return an Observable that emits all of the items emitted by the Observables in the Array
      * @see <a href="http://reactivex.io/documentation/operators/merge.html">ReactiveX operators documentation: Merge</a>
-     * @since (if this graduates from Experimental/Beta to supported, replace this parenthetical with the release number)
+     * @since 1.1.0
      */
-    @Experimental
-    public final static <T> Observable<T> merge(Observable<? extends T>[] sequences, int maxConcurrent) {
+    public static <T> Observable<T> merge(Observable<? extends T>[] sequences, int maxConcurrent) {
         return merge(from(sequences), maxConcurrent);
     }
 
@@ -2119,7 +2290,7 @@ public class Observable<T> {
      *         {@code source} Observable
      * @see <a href="http://reactivex.io/documentation/operators/merge.html">ReactiveX operators documentation: Merge</a>
      */
-    public final static <T> Observable<T> mergeDelayError(Observable<? extends Observable<? extends T>> source) {
+    public static <T> Observable<T> mergeDelayError(Observable<? extends Observable<? extends T>> source) {
         return source.lift(OperatorMerge.<T>instance(true));
     }
 
@@ -2152,9 +2323,68 @@ public class Observable<T> {
      * @since (if this graduates from Experimental/Beta to supported, replace this parenthetical with the release number)
      */
     @Experimental
-    public final static <T> Observable<T> mergeDelayError(Observable<? extends Observable<? extends T>> source, int maxConcurrent) {
+    public static <T> Observable<T> mergeDelayError(Observable<? extends Observable<? extends T>> source, int maxConcurrent) {
         return source.lift(OperatorMerge.<T>instance(true, maxConcurrent));
     }
+
+   /**
+     * Flattens an Iterable of Observables into one Observable, in a way that allows an Observer to receive all
+     * successfully emitted items from each of the source Observables without being interrupted by an error
+     * notification from one of them.
+     * <p>
+     * This behaves like {@link #merge(Observable)} except that if any of the merged Observables notify of an
+     * error via {@link Observer#onError onError}, {@code mergeDelayError} will refrain from propagating that
+     * error notification until all of the merged Observables have finished emitting items.
+     * <p>
+     * <img width="640" height="380" src="https://raw.github.com/wiki/ReactiveX/RxJava/images/rx-operators/mergeDelayError.png" alt="">
+     * <p>
+     * Even if multiple merged Observables send {@code onError} notifications, {@code mergeDelayError} will only
+     * invoke the {@code onError} method of its Observers once.
+     * <dl>
+     *  <dt><b>Scheduler:</b></dt>
+     *  <dd>{@code mergeDelayError} does not operate by default on a particular {@link Scheduler}.</dd>
+     * </dl>
+     * 
+     * @param sequences
+     *            the Iterable of Observables
+     * @return an Observable that emits items that are the result of flattening the items emitted by the
+     *         Observables in the Iterable
+     * @see <a href="http://reactivex.io/documentation/operators/merge.html">ReactiveX operators documentation: Merge</a>
+     */
+    public static <T> Observable<T> mergeDelayError(Iterable<? extends Observable<? extends T>> sequences) {
+        return mergeDelayError(from(sequences));
+    }
+
+   /**
+     * Flattens an Iterable of Observables into one Observable, in a way that allows an Observer to receive all
+     * successfully emitted items from each of the source Observables without being interrupted by an error
+     * notification from one of them, while limiting the number of concurrent subscriptions to these Observables.
+     * <p>
+     * This behaves like {@link #merge(Observable)} except that if any of the merged Observables notify of an
+     * error via {@link Observer#onError onError}, {@code mergeDelayError} will refrain from propagating that
+     * error notification until all of the merged Observables have finished emitting items.
+     * <p>
+     * <img width="640" height="380" src="https://raw.github.com/wiki/ReactiveX/RxJava/images/rx-operators/mergeDelayError.png" alt="">
+     * <p>
+     * Even if multiple merged Observables send {@code onError} notifications, {@code mergeDelayError} will only
+     * invoke the {@code onError} method of its Observers once.
+     * <dl>
+     *  <dt><b>Scheduler:</b></dt>
+     *  <dd>{@code mergeDelayError} does not operate by default on a particular {@link Scheduler}.</dd>
+     * </dl>
+     * 
+     * @param sequences
+     *            the Iterable of Observables
+     * @param maxConcurrent
+     *            the maximum number of Observables that may be subscribed to concurrently
+     * @return an Observable that emits items that are the result of flattening the items emitted by the
+     *         Observables in the Iterable
+     * @see <a href="http://reactivex.io/documentation/operators/merge.html">ReactiveX operators documentation: Merge</a>
+     */
+    public static <T> Observable<T> mergeDelayError(Iterable<? extends Observable<? extends T>> sequences, int maxConcurrent) {
+        return mergeDelayError(from(sequences), maxConcurrent);
+    }
+
 
     /**
      * Flattens two Observables into one Observable, in a way that allows an Observer to receive all
@@ -2181,7 +2411,7 @@ public class Observable<T> {
      * @return an Observable that emits all of the items that are emitted by the two source Observables
      * @see <a href="http://reactivex.io/documentation/operators/merge.html">ReactiveX operators documentation: Merge</a>
      */
-    public final static <T> Observable<T> mergeDelayError(Observable<? extends T> t1, Observable<? extends T> t2) {
+    public static <T> Observable<T> mergeDelayError(Observable<? extends T> t1, Observable<? extends T> t2) {
         return mergeDelayError(just(t1, t2));
     }
 
@@ -2213,7 +2443,7 @@ public class Observable<T> {
      * @return an Observable that emits all of the items that are emitted by the source Observables
      * @see <a href="http://reactivex.io/documentation/operators/merge.html">ReactiveX operators documentation: Merge</a>
      */
-    public final static <T> Observable<T> mergeDelayError(Observable<? extends T> t1, Observable<? extends T> t2, Observable<? extends T> t3) {
+    public static <T> Observable<T> mergeDelayError(Observable<? extends T> t1, Observable<? extends T> t2, Observable<? extends T> t3) {
         return mergeDelayError(just(t1, t2, t3));
     }
 
@@ -2247,7 +2477,7 @@ public class Observable<T> {
      * @return an Observable that emits all of the items that are emitted by the source Observables
      * @see <a href="http://reactivex.io/documentation/operators/merge.html">ReactiveX operators documentation: Merge</a>
      */
-    public final static <T> Observable<T> mergeDelayError(Observable<? extends T> t1, Observable<? extends T> t2, Observable<? extends T> t3, Observable<? extends T> t4) {
+    public static <T> Observable<T> mergeDelayError(Observable<? extends T> t1, Observable<? extends T> t2, Observable<? extends T> t3, Observable<? extends T> t4) {
         return mergeDelayError(just(t1, t2, t3, t4));
     }
 
@@ -2283,7 +2513,7 @@ public class Observable<T> {
      * @return an Observable that emits all of the items that are emitted by the source Observables
      * @see <a href="http://reactivex.io/documentation/operators/merge.html">ReactiveX operators documentation: Merge</a>
      */
-    public final static <T> Observable<T> mergeDelayError(Observable<? extends T> t1, Observable<? extends T> t2, Observable<? extends T> t3, Observable<? extends T> t4, Observable<? extends T> t5) {
+    public static <T> Observable<T> mergeDelayError(Observable<? extends T> t1, Observable<? extends T> t2, Observable<? extends T> t3, Observable<? extends T> t4, Observable<? extends T> t5) {
         return mergeDelayError(just(t1, t2, t3, t4, t5));
     }
 
@@ -2321,7 +2551,7 @@ public class Observable<T> {
      * @return an Observable that emits all of the items that are emitted by the source Observables
      * @see <a href="http://reactivex.io/documentation/operators/merge.html">ReactiveX operators documentation: Merge</a>
      */
-    public final static <T> Observable<T> mergeDelayError(Observable<? extends T> t1, Observable<? extends T> t2, Observable<? extends T> t3, Observable<? extends T> t4, Observable<? extends T> t5, Observable<? extends T> t6) {
+    public static <T> Observable<T> mergeDelayError(Observable<? extends T> t1, Observable<? extends T> t2, Observable<? extends T> t3, Observable<? extends T> t4, Observable<? extends T> t5, Observable<? extends T> t6) {
         return mergeDelayError(just(t1, t2, t3, t4, t5, t6));
     }
 
@@ -2362,7 +2592,7 @@ public class Observable<T> {
      * @return an Observable that emits all of the items that are emitted by the source Observables
      * @see <a href="http://reactivex.io/documentation/operators/merge.html">ReactiveX operators documentation: Merge</a>
      */
-    public final static <T> Observable<T> mergeDelayError(Observable<? extends T> t1, Observable<? extends T> t2, Observable<? extends T> t3, Observable<? extends T> t4, Observable<? extends T> t5, Observable<? extends T> t6, Observable<? extends T> t7) {
+    public static <T> Observable<T> mergeDelayError(Observable<? extends T> t1, Observable<? extends T> t2, Observable<? extends T> t3, Observable<? extends T> t4, Observable<? extends T> t5, Observable<? extends T> t6, Observable<? extends T> t7) {
         return mergeDelayError(just(t1, t2, t3, t4, t5, t6, t7));
     }
 
@@ -2405,7 +2635,7 @@ public class Observable<T> {
      * @see <a href="http://reactivex.io/documentation/operators/merge.html">ReactiveX operators documentation: Merge</a>
      */
     // suppress because the types are checked by the method signature before using a vararg
-    public final static <T> Observable<T> mergeDelayError(Observable<? extends T> t1, Observable<? extends T> t2, Observable<? extends T> t3, Observable<? extends T> t4, Observable<? extends T> t5, Observable<? extends T> t6, Observable<? extends T> t7, Observable<? extends T> t8) {
+    public static <T> Observable<T> mergeDelayError(Observable<? extends T> t1, Observable<? extends T> t2, Observable<? extends T> t3, Observable<? extends T> t4, Observable<? extends T> t5, Observable<? extends T> t6, Observable<? extends T> t7, Observable<? extends T> t8) {
         return mergeDelayError(just(t1, t2, t3, t4, t5, t6, t7, t8));
     }
 
@@ -2449,7 +2679,7 @@ public class Observable<T> {
      * @return an Observable that emits all of the items that are emitted by the source Observables
      * @see <a href="http://reactivex.io/documentation/operators/merge.html">ReactiveX operators documentation: Merge</a>
      */
-    public final static <T> Observable<T> mergeDelayError(Observable<? extends T> t1, Observable<? extends T> t2, Observable<? extends T> t3, Observable<? extends T> t4, Observable<? extends T> t5, Observable<? extends T> t6, Observable<? extends T> t7, Observable<? extends T> t8, Observable<? extends T> t9) {
+    public static <T> Observable<T> mergeDelayError(Observable<? extends T> t1, Observable<? extends T> t2, Observable<? extends T> t3, Observable<? extends T> t4, Observable<? extends T> t5, Observable<? extends T> t6, Observable<? extends T> t7, Observable<? extends T> t8, Observable<? extends T> t9) {
         return mergeDelayError(just(t1, t2, t3, t4, t5, t6, t7, t8, t9));
     }
 
@@ -2486,8 +2716,8 @@ public class Observable<T> {
      * @return an Observable that never emits any items or sends any notifications to an {@link Observer}
      * @see <a href="http://reactivex.io/documentation/operators/empty-never-throw.html">ReactiveX operators documentation: Never</a>
      */
-    public final static <T> Observable<T> never() {
-        return NeverObservable.instance();
+    public static <T> Observable<T> never() {
+        return NeverObservableHolder.instance();
     }
 
     /**
@@ -2509,7 +2739,7 @@ public class Observable<T> {
      *             {@code Integer.MAX_VALUE}
      * @see <a href="http://reactivex.io/documentation/operators/range.html">ReactiveX operators documentation: Range</a>
      */
-    public final static Observable<Integer> range(int start, int count) {
+    public static Observable<Integer> range(int start, int count) {
         if (count < 0) {
             throw new IllegalArgumentException("Count can not be negative");
         }
@@ -2544,7 +2774,7 @@ public class Observable<T> {
      * @return an Observable that emits a range of sequential Integers
      * @see <a href="http://reactivex.io/documentation/operators/range.html">ReactiveX operators documentation: Range</a>
      */
-    public final static Observable<Integer> range(int start, int count, Scheduler scheduler) {
+    public static Observable<Integer> range(int start, int count, Scheduler scheduler) {
         return range(start, count).subscribeOn(scheduler);
     }
 
@@ -2567,18 +2797,10 @@ public class Observable<T> {
      * @return an Observable that emits a Boolean value that indicates whether the two sequences are the same
      * @see <a href="http://reactivex.io/documentation/operators/sequenceequal.html">ReactiveX operators documentation: SequenceEqual</a>
      */
-    public final static <T> Observable<Boolean> sequenceEqual(Observable<? extends T> first, Observable<? extends T> second) {
-        return sequenceEqual(first, second, new Func2<T, T, Boolean>() {
-            @Override
-            public final Boolean call(T first, T second) {
-                if (first == null) {
-                    return second == null;
-                }
-                return first.equals(second);
-            }
-        });
+    public static <T> Observable<Boolean> sequenceEqual(Observable<? extends T> first, Observable<? extends T> second) {
+        return sequenceEqual(first, second, InternalObservableUtils.OBJECT_EQUALS);
     }
-
+    
     /**
      * Returns an Observable that emits a Boolean value that indicates whether two Observable sequences are the
      * same by comparing the items emitted by each Observable pairwise based on the results of a specified
@@ -2602,7 +2824,7 @@ public class Observable<T> {
      *         are the same according to the specified function
      * @see <a href="http://reactivex.io/documentation/operators/sequenceequal.html">ReactiveX operators documentation: SequenceEqual</a>
      */
-    public final static <T> Observable<Boolean> sequenceEqual(Observable<? extends T> first, Observable<? extends T> second, Func2<? super T, ? super T, Boolean> equality) {
+    public static <T> Observable<Boolean> sequenceEqual(Observable<? extends T> first, Observable<? extends T> second, Func2<? super T, ? super T, Boolean> equality) {
         return OperatorSequenceEqual.sequenceEqual(first, second, equality);
     }
 
@@ -2628,8 +2850,37 @@ public class Observable<T> {
      *         Observable
      * @see <a href="http://reactivex.io/documentation/operators/switch.html">ReactiveX operators documentation: Switch</a>
      */
-    public final static <T> Observable<T> switchOnNext(Observable<? extends Observable<? extends T>> sequenceOfSequences) {
-        return sequenceOfSequences.lift(OperatorSwitch.<T>instance());
+    public static <T> Observable<T> switchOnNext(Observable<? extends Observable<? extends T>> sequenceOfSequences) {
+        return sequenceOfSequences.lift(OperatorSwitch.<T>instance(false));
+    }
+
+    /**
+     * Converts an Observable that emits Observables into an Observable that emits the items emitted by the
+     * most recently emitted of those Observables and delays any exception until all Observables terminate.
+     * <p>
+     * <img width="640" height="370" src="https://raw.github.com/wiki/ReactiveX/RxJava/images/rx-operators/switchDo.png" alt="">
+     * <p>
+     * {@code switchOnNext} subscribes to an Observable that emits Observables. Each time it observes one of
+     * these emitted Observables, the Observable returned by {@code switchOnNext} begins emitting the items
+     * emitted by that Observable. When a new Observable is emitted, {@code switchOnNext} stops emitting items
+     * from the earlier-emitted Observable and begins emitting items from the new one.
+     * <dl>
+     *  <dt><b>Scheduler:</b></dt>
+     *  <dd>{@code switchOnNext} does not operate by default on a particular {@link Scheduler}.</dd>
+     * </dl>
+     * 
+     * @param <T> the item type
+     * @param sequenceOfSequences
+     *            the source Observable that emits Observables
+     * @return an Observable that emits the items emitted by the Observable most recently emitted by the source
+     *         Observable
+     * @see <a href="http://reactivex.io/documentation/operators/switch.html">ReactiveX operators documentation: Switch</a>
+     * @Experimental The behavior of this can change at any time.
+     * @since (if this graduates from Experimental/Beta to supported, replace this parenthetical with the release number)
+     */
+    @Experimental
+    public static <T> Observable<T> switchOnNextDelayError(Observable<? extends Observable<? extends T>> sequenceOfSequences) {
+        return sequenceOfSequences.lift(OperatorSwitch.<T>instance(true));
     }
 
     /**
@@ -2657,7 +2908,7 @@ public class Observable<T> {
      * @deprecated use {@link #interval(long, long, TimeUnit)} instead
      */
     @Deprecated
-    public final static Observable<Long> timer(long initialDelay, long period, TimeUnit unit) {
+    public static Observable<Long> timer(long initialDelay, long period, TimeUnit unit) {
         return interval(initialDelay, period, unit, Schedulers.computation());
     }
 
@@ -2688,7 +2939,7 @@ public class Observable<T> {
      * @deprecated use {@link #interval(long, long, TimeUnit, Scheduler)} instead
      */
     @Deprecated
-    public final static Observable<Long> timer(long initialDelay, long period, TimeUnit unit, Scheduler scheduler) {
+    public static Observable<Long> timer(long initialDelay, long period, TimeUnit unit, Scheduler scheduler) {
         return interval(initialDelay, period, unit, scheduler);
     }
 
@@ -2711,7 +2962,7 @@ public class Observable<T> {
      * @return an Observable that emits one item after a specified delay, and then completes
      * @see <a href="http://reactivex.io/documentation/operators/timer.html">ReactiveX operators documentation: Timer</a>
      */
-    public final static Observable<Long> timer(long delay, TimeUnit unit) {
+    public static Observable<Long> timer(long delay, TimeUnit unit) {
         return timer(delay, unit, Schedulers.computation());
     }
 
@@ -2738,7 +2989,7 @@ public class Observable<T> {
      *         completes
      * @see <a href="http://reactivex.io/documentation/operators/timer.html">ReactiveX operators documentation: Timer</a>
      */
-    public final static Observable<Long> timer(long delay, TimeUnit unit, Scheduler scheduler) {
+    public static Observable<Long> timer(long delay, TimeUnit unit, Scheduler scheduler) {
         return create(new OnSubscribeTimerOnce(delay, unit, scheduler));
     }
 
@@ -2760,7 +3011,7 @@ public class Observable<T> {
      * @return the Observable whose lifetime controls the lifetime of the dependent resource object
      * @see <a href="http://reactivex.io/documentation/operators/using.html">ReactiveX operators documentation: Using</a>
      */
-    public final static <T, Resource> Observable<T> using(
+    public static <T, Resource> Observable<T> using(
             final Func0<Resource> resourceFactory,
             final Func1<? super Resource, ? extends Observable<? extends T>> observableFactory,
             final Action1<? super Resource> disposeAction) {
@@ -2771,7 +3022,7 @@ public class Observable<T> {
      * Constructs an Observable that creates a dependent resource object which is disposed of just before 
      * termination if you have set {@code disposeEagerly} to {@code true} and unsubscription does not occur
      * before termination. Otherwise resource disposal will occur on unsubscription.  Eager disposal is
-     * particularly appropriate for a synchronous Observable that resuses resources. {@code disposeAction} will
+     * particularly appropriate for a synchronous Observable that reuses resources. {@code disposeAction} will
      * only be called once per subscription.
      * <p>
      * <img width="640" height="400" src="https://raw.github.com/wiki/ReactiveX/RxJava/images/rx-operators/using.png" alt="">
@@ -2796,7 +3047,7 @@ public class Observable<T> {
      * @since (if this graduates from Experimental/Beta to supported, replace this parenthetical with the release number)
      */
     @Experimental
-    public final static <T, Resource> Observable<T> using(
+    public static <T, Resource> Observable<T> using(
             final Func0<Resource> resourceFactory,
             final Func1<? super Resource, ? extends Observable<? extends T>> observableFactory,
             final Action1<? super Resource> disposeAction, boolean disposeEagerly) {
@@ -2813,7 +3064,7 @@ public class Observable<T> {
      * item emitted by each of those Observables; and so forth.
      * <p>
      * The resulting {@code Observable<R>} returned from {@code zip} will invoke {@code onNext} as many times as
-     * the number of {@code onNext} invokations of the source Observable that emits the fewest items.
+     * the number of {@code onNext} invocations of the source Observable that emits the fewest items.
      * <p>
      * <img width="640" height="380" src="https://raw.github.com/wiki/ReactiveX/RxJava/images/rx-operators/zip.png" alt="">
      * <dl>
@@ -2829,7 +3080,7 @@ public class Observable<T> {
      * @return an Observable that emits the zipped results
      * @see <a href="http://reactivex.io/documentation/operators/zip.html">ReactiveX operators documentation: Zip</a>
      */
-    public final static <R> Observable<R> zip(Iterable<? extends Observable<?>> ws, FuncN<? extends R> zipFunction) {
+    public static <R> Observable<R> zip(Iterable<? extends Observable<?>> ws, FuncN<? extends R> zipFunction) {
         List<Observable<?>> os = new ArrayList<Observable<?>>();
         for (Observable<?> o : ws) {
             os.add(o);
@@ -2847,7 +3098,7 @@ public class Observable<T> {
      * function applied to the second item emitted by each of those Observables; and so forth.
      * <p>
      * The resulting {@code Observable<R>} returned from {@code zip} will invoke {@code onNext} as many times as
-     * the number of {@code onNext} invokations of the source Observable that emits the fewest items.
+     * the number of {@code onNext} invocations of the source Observable that emits the fewest items.
      * <p>
      * <img width="640" height="370" src="https://raw.github.com/wiki/ReactiveX/RxJava/images/rx-operators/zip.o.png" alt="">
      * <dl>
@@ -2863,17 +3114,10 @@ public class Observable<T> {
      * @return an Observable that emits the zipped results
      * @see <a href="http://reactivex.io/documentation/operators/zip.html">ReactiveX operators documentation: Zip</a>
      */
-    public final static <R> Observable<R> zip(Observable<? extends Observable<?>> ws, final FuncN<? extends R> zipFunction) {
-        return ws.toList().map(new Func1<List<? extends Observable<?>>, Observable<?>[]>() {
-
-            @Override
-            public Observable<?>[] call(List<? extends Observable<?>> o) {
-                return o.toArray(new Observable<?>[o.size()]);
-            }
-
-        }).lift(new OperatorZip<R>(zipFunction));
+    public static <R> Observable<R> zip(Observable<? extends Observable<?>> ws, final FuncN<? extends R> zipFunction) {
+        return ws.toList().map(InternalObservableUtils.TO_ARRAY).lift(new OperatorZip<R>(zipFunction));
     }
-
+    
     /**
      * Returns an Observable that emits the results of a specified combiner function applied to combinations of
      * two items emitted, in sequence, by two other Observables.
@@ -2903,7 +3147,7 @@ public class Observable<T> {
      * @return an Observable that emits the zipped results
      * @see <a href="http://reactivex.io/documentation/operators/zip.html">ReactiveX operators documentation: Zip</a>
      */
-    public final static <T1, T2, R> Observable<R> zip(Observable<? extends T1> o1, Observable<? extends T2> o2, final Func2<? super T1, ? super T2, ? extends R> zipFunction) {
+    public static <T1, T2, R> Observable<R> zip(Observable<? extends T1> o1, Observable<? extends T2> o2, final Func2<? super T1, ? super T2, ? extends R> zipFunction) {
         return just(new Observable<?>[] { o1, o2 }).lift(new OperatorZip<R>(zipFunction));
     }
 
@@ -2939,7 +3183,7 @@ public class Observable<T> {
      * @return an Observable that emits the zipped results
      * @see <a href="http://reactivex.io/documentation/operators/zip.html">ReactiveX operators documentation: Zip</a>
      */
-    public final static <T1, T2, T3, R> Observable<R> zip(Observable<? extends T1> o1, Observable<? extends T2> o2, Observable<? extends T3> o3, Func3<? super T1, ? super T2, ? super T3, ? extends R> zipFunction) {
+    public static <T1, T2, T3, R> Observable<R> zip(Observable<? extends T1> o1, Observable<? extends T2> o2, Observable<? extends T3> o3, Func3<? super T1, ? super T2, ? super T3, ? extends R> zipFunction) {
         return just(new Observable<?>[] { o1, o2, o3 }).lift(new OperatorZip<R>(zipFunction));
     }
 
@@ -2977,7 +3221,7 @@ public class Observable<T> {
      * @return an Observable that emits the zipped results
      * @see <a href="http://reactivex.io/documentation/operators/zip.html">ReactiveX operators documentation: Zip</a>
      */
-    public final static <T1, T2, T3, T4, R> Observable<R> zip(Observable<? extends T1> o1, Observable<? extends T2> o2, Observable<? extends T3> o3, Observable<? extends T4> o4, Func4<? super T1, ? super T2, ? super T3, ? super T4, ? extends R> zipFunction) {
+    public static <T1, T2, T3, T4, R> Observable<R> zip(Observable<? extends T1> o1, Observable<? extends T2> o2, Observable<? extends T3> o3, Observable<? extends T4> o4, Func4<? super T1, ? super T2, ? super T3, ? super T4, ? extends R> zipFunction) {
         return just(new Observable<?>[] { o1, o2, o3, o4 }).lift(new OperatorZip<R>(zipFunction));
     }
 
@@ -3017,7 +3261,7 @@ public class Observable<T> {
      * @return an Observable that emits the zipped results
      * @see <a href="http://reactivex.io/documentation/operators/zip.html">ReactiveX operators documentation: Zip</a>
      */
-    public final static <T1, T2, T3, T4, T5, R> Observable<R> zip(Observable<? extends T1> o1, Observable<? extends T2> o2, Observable<? extends T3> o3, Observable<? extends T4> o4, Observable<? extends T5> o5, Func5<? super T1, ? super T2, ? super T3, ? super T4, ? super T5, ? extends R> zipFunction) {
+    public static <T1, T2, T3, T4, T5, R> Observable<R> zip(Observable<? extends T1> o1, Observable<? extends T2> o2, Observable<? extends T3> o3, Observable<? extends T4> o4, Observable<? extends T5> o5, Func5<? super T1, ? super T2, ? super T3, ? super T4, ? super T5, ? extends R> zipFunction) {
         return just(new Observable<?>[] { o1, o2, o3, o4, o5 }).lift(new OperatorZip<R>(zipFunction));
     }
 
@@ -3058,7 +3302,7 @@ public class Observable<T> {
      * @return an Observable that emits the zipped results
      * @see <a href="http://reactivex.io/documentation/operators/zip.html">ReactiveX operators documentation: Zip</a>
      */
-    public final static <T1, T2, T3, T4, T5, T6, R> Observable<R> zip(Observable<? extends T1> o1, Observable<? extends T2> o2, Observable<? extends T3> o3, Observable<? extends T4> o4, Observable<? extends T5> o5, Observable<? extends T6> o6,
+    public static <T1, T2, T3, T4, T5, T6, R> Observable<R> zip(Observable<? extends T1> o1, Observable<? extends T2> o2, Observable<? extends T3> o3, Observable<? extends T4> o4, Observable<? extends T5> o5, Observable<? extends T6> o6,
             Func6<? super T1, ? super T2, ? super T3, ? super T4, ? super T5, ? super T6, ? extends R> zipFunction) {
         return just(new Observable<?>[] { o1, o2, o3, o4, o5, o6 }).lift(new OperatorZip<R>(zipFunction));
     }
@@ -3102,7 +3346,7 @@ public class Observable<T> {
      * @return an Observable that emits the zipped results
      * @see <a href="http://reactivex.io/documentation/operators/zip.html">ReactiveX operators documentation: Zip</a>
      */
-    public final static <T1, T2, T3, T4, T5, T6, T7, R> Observable<R> zip(Observable<? extends T1> o1, Observable<? extends T2> o2, Observable<? extends T3> o3, Observable<? extends T4> o4, Observable<? extends T5> o5, Observable<? extends T6> o6, Observable<? extends T7> o7,
+    public static <T1, T2, T3, T4, T5, T6, T7, R> Observable<R> zip(Observable<? extends T1> o1, Observable<? extends T2> o2, Observable<? extends T3> o3, Observable<? extends T4> o4, Observable<? extends T5> o5, Observable<? extends T6> o6, Observable<? extends T7> o7,
             Func7<? super T1, ? super T2, ? super T3, ? super T4, ? super T5, ? super T6, ? super T7, ? extends R> zipFunction) {
         return just(new Observable<?>[] { o1, o2, o3, o4, o5, o6, o7 }).lift(new OperatorZip<R>(zipFunction));
     }
@@ -3148,7 +3392,7 @@ public class Observable<T> {
      * @return an Observable that emits the zipped results
      * @see <a href="http://reactivex.io/documentation/operators/zip.html">ReactiveX operators documentation: Zip</a>
      */
-    public final static <T1, T2, T3, T4, T5, T6, T7, T8, R> Observable<R> zip(Observable<? extends T1> o1, Observable<? extends T2> o2, Observable<? extends T3> o3, Observable<? extends T4> o4, Observable<? extends T5> o5, Observable<? extends T6> o6, Observable<? extends T7> o7, Observable<? extends T8> o8,
+    public static <T1, T2, T3, T4, T5, T6, T7, T8, R> Observable<R> zip(Observable<? extends T1> o1, Observable<? extends T2> o2, Observable<? extends T3> o3, Observable<? extends T4> o4, Observable<? extends T5> o5, Observable<? extends T6> o6, Observable<? extends T7> o7, Observable<? extends T8> o8,
             Func8<? super T1, ? super T2, ? super T3, ? super T4, ? super T5, ? super T6, ? super T7, ? super T8, ? extends R> zipFunction) {
         return just(new Observable<?>[] { o1, o2, o3, o4, o5, o6, o7, o8 }).lift(new OperatorZip<R>(zipFunction));
     }
@@ -3196,7 +3440,7 @@ public class Observable<T> {
      * @return an Observable that emits the zipped results
      * @see <a href="http://reactivex.io/documentation/operators/zip.html">ReactiveX operators documentation: Zip</a>
      */
-    public final static <T1, T2, T3, T4, T5, T6, T7, T8, T9, R> Observable<R> zip(Observable<? extends T1> o1, Observable<? extends T2> o2, Observable<? extends T3> o3, Observable<? extends T4> o4, Observable<? extends T5> o5, Observable<? extends T6> o6, Observable<? extends T7> o7, Observable<? extends T8> o8,
+    public static <T1, T2, T3, T4, T5, T6, T7, T8, T9, R> Observable<R> zip(Observable<? extends T1> o1, Observable<? extends T2> o2, Observable<? extends T3> o3, Observable<? extends T4> o4, Observable<? extends T5> o5, Observable<? extends T6> o6, Observable<? extends T7> o7, Observable<? extends T8> o8,
             Observable<? extends T9> o9, Func9<? super T1, ? super T2, ? super T3, ? super T4, ? super T5, ? super T6, ? super T7, ? super T8, ? super T9, ? extends R> zipFunction) {
         return just(new Observable<?>[] { o1, o2, o3, o4, o5, o6, o7, o8, o9 }).lift(new OperatorZip<R>(zipFunction));
     }
@@ -3630,7 +3874,7 @@ public class Observable<T> {
      * subscribe/unsubscribe behavior of all the {@link Subscriber}s.
      * <p>
      * When you call {@code cache}, it does not yet subscribe to the source Observable and so does not yet
-     * begin cacheing items. This only happens when the first Subscriber calls the resulting Observable's
+     * begin caching items. This only happens when the first Subscriber calls the resulting Observable's
      * {@code subscribe} method.
      * <p>
      * <em>Note:</em> You sacrifice the ability to unsubscribe from the origin when you use the {@code cache}
@@ -3653,6 +3897,15 @@ public class Observable<T> {
     }
 
     /**
+     * @see #cacheWithInitialCapacity(int)
+     * @deprecated Use {@link #cacheWithInitialCapacity(int)} instead.
+     */
+    @Deprecated
+    public final Observable<T> cache(int initialCapacity) {
+        return cacheWithInitialCapacity(initialCapacity);
+    }
+
+    /**
      * Caches emissions from the source Observable and replays them in order to any subsequent Subscribers.
      * This method has similar behavior to {@link #replay} except that this auto-subscribes to the source
      * Observable rather than returning a {@link ConnectableObservable} for which you must call
@@ -3664,7 +3917,7 @@ public class Observable<T> {
      * subscribe/unsubscribe behavior of all the {@link Subscriber}s.
      * <p>
      * When you call {@code cache}, it does not yet subscribe to the source Observable and so does not yet
-     * begin cacheing items. This only happens when the first Subscriber calls the resulting Observable's
+     * begin caching items. This only happens when the first Subscriber calls the resulting Observable's
      * {@code subscribe} method.
      * <p>
      * <em>Note:</em> You sacrifice the ability to unsubscribe from the origin when you use the {@code cache}
@@ -3677,14 +3930,17 @@ public class Observable<T> {
      *  <dt><b>Scheduler:</b></dt>
      *  <dd>{@code cache} does not operate by default on a particular {@link Scheduler}.</dd>
      * </dl>
+     * <p>
+     * <em>Note:</em> The capacity hint is not an upper bound on cache size. For that, consider
+     * {@link #replay(int)} in combination with {@link ConnectableObservable#autoConnect()} or similar.
      * 
-     * @param capacityHint hint for number of items to cache (for optimizing underlying data structure)
+     * @param initialCapacity hint for number of items to cache (for optimizing underlying data structure)
      * @return an Observable that, when first subscribed to, caches all of its items and notifications for the
      *         benefit of subsequent subscribers
      * @see <a href="http://reactivex.io/documentation/operators/replay.html">ReactiveX operators documentation: Replay</a>
      */
-    public final Observable<T> cache(int capacityHint) {
-        return CachedObservable.from(this, capacityHint);
+    public final Observable<T> cacheWithInitialCapacity(int initialCapacity) {
+        return CachedObservable.from(this, initialCapacity);
     }
 
     /**
@@ -3733,15 +3989,7 @@ public class Observable<T> {
      * @see <a href="http://reactivex.io/documentation/operators/reduce.html">ReactiveX operators documentation: Reduce</a>
      */
     public final <R> Observable<R> collect(Func0<R> stateFactory, final Action2<R, ? super T> collector) {
-        Func2<R, T, R> accumulator = new Func2<R, T, R>() {
-
-            @Override
-            public final R call(R state, T value) {
-                collector.call(state, value);
-                return state;
-            }
-
-        };
+        Func2<R, T, R> accumulator = InternalObservableUtils.createCollectorCaller(collector);
         
         /*
          * Discussion and confirmation of implementation at
@@ -3755,7 +4003,7 @@ public class Observable<T> {
     /**
      * Returns a new Observable that emits items resulting from applying a function that you supply to each item
      * emitted by the source Observable, where that function returns an Observable, and then emitting the items
-     * that result from concatinating those resulting Observables.
+     * that result from concatenating those resulting Observables.
      * <p>
      * <img width="640" height="305" src="https://raw.github.com/wiki/ReactiveX/RxJava/images/rx-operators/concatMap.png" alt="">
      * <dl>
@@ -3767,11 +4015,64 @@ public class Observable<T> {
      *            a function that, when applied to an item emitted by the source Observable, returns an
      *            Observable
      * @return an Observable that emits the result of applying the transformation function to each item emitted
-     *         by the source Observable and concatinating the Observables obtained from this transformation
+     *         by the source Observable and concatenating the Observables obtained from this transformation
      * @see <a href="http://reactivex.io/documentation/operators/flatmap.html">ReactiveX operators documentation: FlatMap</a>
      */
     public final <R> Observable<R> concatMap(Func1<? super T, ? extends Observable<? extends R>> func) {
-        return concat(map(func));
+        if (this instanceof ScalarSynchronousObservable) {
+            ScalarSynchronousObservable<T> scalar = (ScalarSynchronousObservable<T>) this;
+            return scalar.scalarFlatMap(func);
+        }
+        return create(new OnSubscribeConcatMap<T, R>(this, func, 2, OnSubscribeConcatMap.IMMEDIATE));
+    }
+    
+    /**
+     * Maps each of the items into an Observable, subscribes to them one after the other,
+     * one at a time and emits their values in order
+     * while delaying any error from either this or any of the inner Observables
+     * till all of them terminate.
+     * 
+     * <dl>
+     *  <dt><b>Backpressure:</b></dt>
+     *  <dd>{@code concatMapDelayError} fully supports backpressure.</dd>
+     *  <dt><b>Scheduler:</b></dt>
+     *  <dd>{@code concatMapDelayError} does not operate by default on a particular {@link Scheduler}.</dd>
+     * </dl>
+     * 
+     * @param <R> the result value type
+     * @param func the function that maps the items of this Observable into the inner Observables.
+     * @return the new Observable instance with the concatenation behavior
+     */
+    @Experimental
+    public final <R> Observable<R> concatMapDelayError(Func1<? super T, ? extends Observable<?extends R>> func) {
+        if (this instanceof ScalarSynchronousObservable) {
+            ScalarSynchronousObservable<T> scalar = (ScalarSynchronousObservable<T>) this;
+            return scalar.scalarFlatMap(func);
+        }
+        return create(new OnSubscribeConcatMap<T, R>(this, func, 2, OnSubscribeConcatMap.END));
+    }
+    
+    /**
+     * Returns an Observable that concatenate each item emitted by the source Observable with the values in an
+     * Iterable corresponding to that item that is generated by a selector.
+     * <p>
+     * 
+     * <dl>
+     *  <dt><b>Scheduler:</b></dt>
+     *  <dd>{@code concatMapIterable} does not operate by default on a particular {@link Scheduler}.</dd>
+     * </dl>
+     * 
+     * @param <R>
+     *            the type of item emitted by the resulting Observable
+     * @param collectionSelector
+     *            a function that returns an Iterable sequence of values for when given an item emitted by the
+     *            source Observable
+     * @return an Observable that emits the results of concatenating the items emitted by the source Observable with
+     *         the values in the Iterables corresponding to those items, as generated by {@code collectionSelector}
+     * @see <a href="http://reactivex.io/documentation/operators/flatmap.html">ReactiveX operators documentation: FlatMap</a>
+     */
+    public final <R> Observable<R> concatMapIterable(Func1<? super T, ? extends Iterable<? extends R>> collectionSelector) {
+        return concat(map(OperatorMapPair.convertSelector(collectionSelector)));
     }
     
     /**
@@ -3811,12 +4112,7 @@ public class Observable<T> {
      * @see <a href="http://reactivex.io/documentation/operators/contains.html">ReactiveX operators documentation: Contains</a>
      */
     public final Observable<Boolean> contains(final Object element) {
-        return exists(new Func1<T, Boolean>() {
-            @Override
-            public final Boolean call(T t1) {
-                return element == null ? t1 == null : element.equals(t1);
-            }
-        });
+        return exists(InternalObservableUtils.equalsWith(element));
     }
 
     /**
@@ -3836,16 +4132,7 @@ public class Observable<T> {
      * @see #countLong()
      */
     public final Observable<Integer> count() {
-        return reduce(0, CountHolder.INSTANCE);
-    }
-    
-    private static final class CountHolder {
-        static final Func2<Integer, Object, Integer> INSTANCE = new Func2<Integer, Object, Integer>() {
-            @Override
-            public final Integer call(Integer count, Object o) {
-                return count + 1;
-            }
-        };
+        return reduce(0, InternalObservableUtils.COUNTER);
     }
     
     /**
@@ -3867,18 +4154,9 @@ public class Observable<T> {
      * @see #count()
      */
     public final Observable<Long> countLong() {
-        return reduce(0L, CountLongHolder.INSTANCE);
+        return reduce(0L, InternalObservableUtils.LONG_COUNTER);
     }
 
-    private static final class CountLongHolder {
-        static final Func2<Long, Object, Long> INSTANCE = new Func2<Long, Object, Long>() {
-            @Override
-            public final Long call(Long count, Object o) {
-                return count + 1;
-            }
-        };
-    }
-    
     /**
      * Returns an Observable that mirrors the source Observable, except that it drops items emitted by the
      * source Observable that are followed by another item within a computed debounce duration.
@@ -4004,12 +4282,7 @@ public class Observable<T> {
      */
     public final Observable<T> defaultIfEmpty(final T defaultValue) {
         //if empty switch to an observable that emits defaultValue and supports backpressure
-        return switchIfEmpty(Observable.create(new OnSubscribe<T>() {
-
-            @Override
-            public void call(Subscriber<? super T> subscriber) {
-                subscriber.setProducer(new SingleProducer<T>(subscriber, defaultValue));
-            }}));
+        return switchIfEmpty(just(defaultValue));
     }
 
     /**
@@ -4025,15 +4298,14 @@ public class Observable<T> {
      *              the alternate Observable to subscribe to if the source does not emit any items
      * @return  an Observable that emits the items emitted by the source Observable or the items of an
      *          alternate Observable if the source Observable is empty.
-     * @since (if this graduates from Experimental/Beta to supported, replace this parenthetical with the release number)
+     * @since 1.1.0
      */
-    @Experimental
     public final Observable<T> switchIfEmpty(Observable<? extends T> alternate) {
         return lift(new OperatorSwitchIfEmpty<T>(alternate));
     }
 
     /**
-     * Returns an Observable that delays the subscription to and emissions from the souce Observable via another
+     * Returns an Observable that delays the subscription to and emissions from the source Observable via another
      * Observable on a per-item basis.
      * <p>
      * <img width="640" height="450" src="https://raw.github.com/wiki/ReactiveX/RxJava/images/rx-operators/delay.oo.png" alt="">
@@ -4100,7 +4372,7 @@ public class Observable<T> {
      * <img width="640" height="310" src="https://raw.github.com/wiki/ReactiveX/RxJava/images/rx-operators/delay.png" alt="">
      * <dl>
      *  <dt><b>Scheduler:</b></dt>
-     *  <dd>This version of {@code delay} operates by default on the {@code compuation} {@link Scheduler}.</dd>
+     *  <dd>This version of {@code delay} operates by default on the {@code computation} {@link Scheduler}.</dd>
      * </dl>
      * 
      * @param delay
@@ -4134,7 +4406,7 @@ public class Observable<T> {
      * @see <a href="http://reactivex.io/documentation/operators/delay.html">ReactiveX operators documentation: Delay</a>
      */
     public final Observable<T> delay(long delay, TimeUnit unit, Scheduler scheduler) {
-        return lift(new OperatorDelay<T>(this, delay, unit, scheduler));
+        return lift(new OperatorDelay<T>(delay, unit, scheduler));
     }
 
     /**
@@ -4143,7 +4415,7 @@ public class Observable<T> {
      * <img width="640" height="310" src="https://raw.github.com/wiki/ReactiveX/RxJava/images/rx-operators/delaySubscription.png" alt="">
      * <dl>
      *  <dt><b>Scheduler:</b></dt>
-     *  <dd>This version of {@code delay} operates by default on the {@code compuation} {@link Scheduler}.</dd>
+     *  <dd>This version of {@code delay} operates by default on the {@code computation} {@link Scheduler}.</dd>
      * </dl>
      * 
      * @param delay
@@ -4188,7 +4460,7 @@ public class Observable<T> {
      * <img width="640" height="310" src="https://raw.github.com/wiki/ReactiveX/RxJava/images/rx-operators/delaySubscription.o.png" alt="">
      * <dl>
      *  <dt><b>Scheduler:</b></dt>
-     *  <dd>This version of {@code delay} operates by default on the {@code compuation} {@link Scheduler}.</dd>
+     *  <dd>This method does not operate by default on a particular {@link Scheduler}.</dd>
      * </dl>
      * 
      * @param subscriptionDelay
@@ -4202,6 +4474,32 @@ public class Observable<T> {
         return create(new OnSubscribeDelaySubscriptionWithSelector<T, U>(this, subscriptionDelay));
     }
 
+    /**
+     * Returns an Observable that delays the subscription to this Observable
+     * until the other Observable emits an element or completes normally.
+     * <p>
+     * <dl>
+     *  <dt><b>Backpressure:</b></dt>
+     *  <dd>The operator forwards the backpressure requests to this Observable once
+     *  the subscription happens and requests Long.MAX_VALUE from the other Observable</dd>
+     *  <dt><b>Scheduler:</b></dt>
+     *  <dd>This method does not operate by default on a particular {@link Scheduler}.</dd>
+     * </dl>
+     * 
+     * @param <U> the value type of the other Observable, irrelevant
+     * @param other the other Observable that should trigger the subscription
+     *        to this Observable.
+     * @return an Observable that delays the subscription to this Observable
+     *         until the other Observable emits an element or completes normally.
+     */
+    @Experimental
+    public final <U> Observable<T> delaySubscription(Observable<U> other) {
+        if (other == null) {
+            throw new NullPointerException();
+        }
+        return create(new OnSubscribeDelaySubscriptionOther<T, U>(this, other));
+    }
+    
     /**
      * Returns an Observable that reverses the effect of {@link #materialize materialize} by transforming the
      * {@link Notification} objects emitted by the source Observable into the items or notifications they
@@ -4315,21 +4613,9 @@ public class Observable<T> {
      * @see <a href="http://reactivex.io/documentation/operators/do.html">ReactiveX operators documentation: Do</a>
      */
     public final Observable<T> doOnCompleted(final Action0 onCompleted) {
-        Observer<T> observer = new Observer<T>() {
-            @Override
-            public final void onCompleted() {
-                onCompleted.call();
-            }
-
-            @Override
-            public final void onError(Throwable e) {
-            }
-
-            @Override
-            public final void onNext(T args) {
-            }
-
-        };
+        Action1<T> onNext = Actions.empty();
+        Action1<Throwable> onError = Actions.empty();
+        Observer<T> observer = new ActionSubscriber<T>(onNext, onError, onCompleted);
 
         return lift(new OperatorDoOnEach<T>(observer));
     }
@@ -4349,23 +4635,7 @@ public class Observable<T> {
      * @see <a href="http://reactivex.io/documentation/operators/do.html">ReactiveX operators documentation: Do</a>
      */
     public final Observable<T> doOnEach(final Action1<Notification<? super T>> onNotification) {
-        Observer<T> observer = new Observer<T>() {
-            @Override
-            public final void onCompleted() {
-                onNotification.call(Notification.createOnCompleted());
-            }
-
-            @Override
-            public final void onError(Throwable e) {
-                onNotification.call(Notification.createOnError(e));
-            }
-
-            @Override
-            public final void onNext(T v) {
-                onNotification.call(Notification.createOnNext(v));
-            }
-
-        };
+        Observer<T> observer = new ActionNotificationObserver<T>(onNotification);
 
         return lift(new OperatorDoOnEach<T>(observer));
     }
@@ -4411,21 +4681,9 @@ public class Observable<T> {
      * @see <a href="http://reactivex.io/documentation/operators/do.html">ReactiveX operators documentation: Do</a>
      */
     public final Observable<T> doOnError(final Action1<Throwable> onError) {
-        Observer<T> observer = new Observer<T>() {
-            @Override
-            public final void onCompleted() {
-            }
-
-            @Override
-            public final void onError(Throwable e) {
-                onError.call(e);
-            }
-
-            @Override
-            public final void onNext(T args) {
-            }
-
-        };
+        Action1<T> onNext = Actions.empty();
+        Action0 onCompleted = Actions.empty();
+        Observer<T> observer = new ActionSubscriber<T>(onNext, onError, onCompleted);
 
         return lift(new OperatorDoOnEach<T>(observer));
     }
@@ -4445,21 +4703,9 @@ public class Observable<T> {
      * @see <a href="http://reactivex.io/documentation/operators/do.html">ReactiveX operators documentation: Do</a>
      */
     public final Observable<T> doOnNext(final Action1<? super T> onNext) {
-        Observer<T> observer = new Observer<T>() {
-            @Override
-            public final void onCompleted() {
-            }
-
-            @Override
-            public final void onError(Throwable e) {
-            }
-
-            @Override
-            public final void onNext(T args) {
-                onNext.call(args);
-            }
-
-        };
+        Action1<Throwable> onError = Actions.empty();
+        Action0 onCompleted = Actions.empty();
+        Observer<T> observer = new ActionSubscriber<T>(onNext, onError, onCompleted);
 
         return lift(new OperatorDoOnEach<T>(observer));
     }
@@ -4530,22 +4776,10 @@ public class Observable<T> {
      * @see #finallyDo(Action0)
      */
     public final Observable<T> doOnTerminate(final Action0 onTerminate) {
-        Observer<T> observer = new Observer<T>() {
-            @Override
-            public final void onCompleted() {
-                onTerminate.call();
-            }
-
-            @Override
-            public final void onError(Throwable e) {
-                onTerminate.call();
-            }
-
-            @Override
-            public final void onNext(T args) {
-            }
-
-        };
+        Action1<T> onNext = Actions.empty();
+        Action1<Throwable> onError = Actions.toAction1(onTerminate);
+        
+        Observer<T> observer = new ActionSubscriber<T>(onNext, onError, onTerminate);
 
         return lift(new OperatorDoOnEach<T>(observer));
     }
@@ -4992,12 +5226,46 @@ public class Observable<T> {
         if (capacityHint < 1) {
             throw new IllegalArgumentException("capacityHint > 0 required but it was " + capacityHint);
         }
-        return lift(new OperatorEagerConcatMap<T, R>(mapper, capacityHint));
+        return lift(new OperatorEagerConcatMap<T, R>(mapper, capacityHint, Integer.MAX_VALUE));
+    }
+
+    /**
+     * Maps a sequence of values into Observables and concatenates these Observables eagerly into a single
+     * Observable.
+     * <p>
+     * Eager concatenation means that once a subscriber subscribes, this operator subscribes to all of the
+     * source Observables. The operator buffers the values emitted by these Observables and then drains them in
+     * order, each one after the previous one completes.
+     * <dl>
+     *  <dt><b>Backpressure:</b></dt>
+     *  <dd>Backpressure is honored towards the downstream, however, due to the eagerness requirement, sources
+     *      are subscribed to in unbounded mode and their values are queued up in an unbounded buffer.</dd>
+     *  <dt><b>Scheduler:</b></dt>
+     *  <dd>This method does not operate by default on a particular {@link Scheduler}.</dd>
+     * </dl>
+     * @param <R> the value type
+     * @param mapper the function that maps a sequence of values into a sequence of Observables that will be
+     *               eagerly concatenated
+     * @param capacityHint hints about the number of expected source sequence values
+     * @param maxConcurrent the maximum number of concurrent subscribed observables
+     * @return
+     * @warn javadoc fails to describe the return value
+     * @since (if this graduates from Experimental/Beta to supported, replace this parenthetical with the release number)
+     */
+    @Experimental
+    public final <R> Observable<R> concatMapEager(Func1<? super T, ? extends Observable<? extends R>> mapper, int capacityHint, int maxConcurrent) {
+        if (capacityHint < 1) {
+            throw new IllegalArgumentException("capacityHint > 0 required but it was " + capacityHint);
+        }
+        if (maxConcurrent < 1) {
+            throw new IllegalArgumentException("maxConcurrent > 0 required but it was " + capacityHint);
+        }
+        return lift(new OperatorEagerConcatMap<T, R>(mapper, capacityHint, maxConcurrent));
     }
     
     /**
      * Returns an Observable that emits the single item at a specified index in a sequence of emissions from a
-     * source Observbable.
+     * source Observable.
      * <p>
      * <img width="640" height="310" src="https://raw.github.com/wiki/ReactiveX/RxJava/images/rx-operators/elementAt.png" alt="">
      * <dl>
@@ -5103,9 +5371,32 @@ public class Observable<T> {
      *         {@link Action0}
      * @see <a href="http://reactivex.io/documentation/operators/do.html">ReactiveX operators documentation: Do</a>
      * @see #doOnTerminate(Action0)
+     * @deprecated use {@link #doAfterTerminate(Action0)} instead.
      */
+    @Deprecated
     public final Observable<T> finallyDo(Action0 action) {
-        return lift(new OperatorFinally<T>(action));
+        return lift(new OperatorDoAfterTerminate<T>(action));
+    }
+
+    /**
+     * Registers an {@link Action0} to be called when this Observable invokes either
+     * {@link Observer#onCompleted onCompleted} or {@link Observer#onError onError}.
+     * <p>
+     * <img width="640" height="310" src="https://raw.github.com/wiki/ReactiveX/RxJava/images/rx-operators/finallyDo.png" alt="">
+     * <dl>
+     *  <dt><b>Scheduler:</b></dt>
+     *  <dd>{@code doAfterTerminate} does not operate by default on a particular {@link Scheduler}.</dd>
+     * </dl>
+     *
+     * @param action
+     *            an {@link Action0} to be invoked when the source Observable finishes
+     * @return an Observable that emits the same items as the source Observable, then invokes the
+     *         {@link Action0}
+     * @see <a href="http://reactivex.io/documentation/operators/do.html">ReactiveX operators documentation: Do</a>
+     * @see #doOnTerminate(Action0)
+     */
+    public final Observable<T> doAfterTerminate(Action0 action) {
+        return lift(new OperatorDoAfterTerminate<T>(action));
     }
 
     /**
@@ -5396,6 +5687,36 @@ public class Observable<T> {
     }
 
     /**
+     * Returns an Observable that merges each item emitted by the source Observable with the values in an
+     * Iterable corresponding to that item that is generated by a selector, while limiting the number of concurrent
+     * subscriptions to these Observables.
+     * <p>
+     * <img width="640" height="310" src="https://raw.github.com/wiki/ReactiveX/RxJava/images/rx-operators/mergeMapIterable.png" alt="">
+     * <dl>
+     *  <dt><b>Scheduler:</b></dt>
+     *  <dd>{@code flatMapIterable} does not operate by default on a particular {@link Scheduler}.</dd>
+     * </dl>
+     *
+     * @param <R>
+     *            the type of item emitted by the resulting Observable
+     * @param collectionSelector
+     *            a function that returns an Iterable sequence of values for when given an item emitted by the
+     *            source Observable
+     * @param maxConcurrent
+     *            the maximum number of Observables that may be subscribed to concurrently
+     * @return an Observable that emits the results of merging the items emitted by the source Observable with
+     *         the values in the Iterables corresponding to those items, as generated by {@code collectionSelector}
+     * @throws IllegalArgumentException
+     *             if {@code maxConcurrent} is less than or equal to 0
+     * @see <a href="http://reactivex.io/documentation/operators/flatmap.html">ReactiveX operators documentation: FlatMap</a>
+     * @since (if this graduates from Experimental/Beta to supported, replace this parenthetical with the release number)
+     */
+    @Beta
+    public final <R> Observable<R> flatMapIterable(Func1<? super T, ? extends Iterable<? extends R>> collectionSelector, int maxConcurrent) {
+        return merge(map(OperatorMapPair.convertSelector(collectionSelector)), maxConcurrent);
+    }
+    
+    /**
      * Returns an Observable that emits the results of applying a function to the pair of values from the source
      * Observable and an Iterable corresponding to that item that is generated by a selector.
      * <p>
@@ -5408,7 +5729,7 @@ public class Observable<T> {
      * @param <U>
      *            the collection element type
      * @param <R>
-     *            the type of item emited by the resulting Observable
+     *            the type of item emitted by the resulting Observable
      * @param collectionSelector
      *            a function that returns an Iterable sequence of values for each item emitted by the source
      *            Observable
@@ -5421,7 +5742,43 @@ public class Observable<T> {
      */
     public final <U, R> Observable<R> flatMapIterable(Func1<? super T, ? extends Iterable<? extends U>> collectionSelector,
             Func2<? super T, ? super U, ? extends R> resultSelector) {
-        return flatMap(OperatorMapPair.convertSelector(collectionSelector), resultSelector);
+        return (Observable<R>)flatMap(OperatorMapPair.convertSelector(collectionSelector), resultSelector);
+    }
+
+    /**
+     * Returns an Observable that emits the results of applying a function to the pair of values from the source
+     * Observable and an Iterable corresponding to that item that is generated by a selector, while limiting the
+     * number of concurrent subscriptions to these Observables.
+     * <p>
+     * <img width="640" height="390" src="https://raw.github.com/wiki/ReactiveX/RxJava/images/rx-operators/mergeMapIterable.r.png" alt="">
+     * <dl>
+     *  <dt><b>Scheduler:</b></dt>
+     *  <dd>{@code flatMapIterable} does not operate by default on a particular {@link Scheduler}.</dd>
+     * </dl>
+     *
+     * @param <U>
+     *            the collection element type
+     * @param <R>
+     *            the type of item emitted by the resulting Observable
+     * @param collectionSelector
+     *            a function that returns an Iterable sequence of values for each item emitted by the source
+     *            Observable
+     * @param resultSelector
+     *            a function that returns an item based on the item emitted by the source Observable and the
+     *            Iterable returned for that item by the {@code collectionSelector}
+     * @param maxConcurrent
+     *            the maximum number of Observables that may be subscribed to concurrently
+     * @return an Observable that emits the items returned by {@code resultSelector} for each item in the source
+     *         Observable
+     * @throws IllegalArgumentException
+     *             if {@code maxConcurrent} is less than or equal to 0
+     * @see <a href="http://reactivex.io/documentation/operators/flatmap.html">ReactiveX operators documentation: FlatMap</a>
+     * @since (if this graduates from Experimental/Beta to supported, replace this parenthetical with the release number)
+     */
+    @Beta
+    public final <U, R> Observable<R> flatMapIterable(Func1<? super T, ? extends Iterable<? extends U>> collectionSelector,
+            Func2<? super T, ? super U, ? extends R> resultSelector, int maxConcurrent) {
+        return (Observable<R>)flatMap(OperatorMapPair.convertSelector(collectionSelector), resultSelector, maxConcurrent);
     }
 
     /**
@@ -5498,14 +5855,17 @@ public class Observable<T> {
     
     /**
      * Groups the items emitted by an {@code Observable} according to a specified criterion, and emits these
-     * grouped items as {@link GroupedObservable}s, one {@code GroupedObservable} per group.
+     * grouped items as {@link GroupedObservable}s. The emitted {@code GroupedObservable} allows only a single 
+     * {@link Subscriber} during its lifetime and if this {@code Subscriber} unsubscribes before the 
+     * source terminates, the next emission by the source having the same key will trigger a new 
+     * {@code GroupedObservable} emission.
      * <p>
      * <img width="640" height="360" src="https://raw.github.com/wiki/ReactiveX/RxJava/images/rx-operators/groupBy.png" alt="">
      * <p>
      * <em>Note:</em> A {@link GroupedObservable} will cache the items it is to emit until such time as it
      * is subscribed to. For this reason, in order to avoid memory leaks, you should not simply ignore those
      * {@code GroupedObservable}s that do not concern you. Instead, you can signal to them that they may
-     * discard their buffers by applying an operator like {@link #take}{@code (0)} to them.
+     * discard their buffers by applying an operator like {@link #ignoreElements} to them.
      * <dl>
      *  <dt><b>Scheduler:</b></dt>
      *  <dd>{@code groupBy} does not operate by default on a particular {@link Scheduler}.</dd>
@@ -5530,14 +5890,17 @@ public class Observable<T> {
     
     /**
      * Groups the items emitted by an {@code Observable} according to a specified criterion, and emits these
-     * grouped items as {@link GroupedObservable}s, one {@code GroupedObservable} per group.
+     * grouped items as {@link GroupedObservable}s. The emitted {@code GroupedObservable} allows only a single 
+     * {@link Subscriber} during its lifetime and if this {@code Subscriber} unsubscribes before the 
+     * source terminates, the next emission by the source having the same key will trigger a new 
+     * {@code GroupedObservable} emission.
      * <p>
      * <img width="640" height="360" src="https://raw.github.com/wiki/ReactiveX/RxJava/images/rx-operators/groupBy.png" alt="">
      * <p>
      * <em>Note:</em> A {@link GroupedObservable} will cache the items it is to emit until such time as it
      * is subscribed to. For this reason, in order to avoid memory leaks, you should not simply ignore those
      * {@code GroupedObservable}s that do not concern you. Instead, you can signal to them that they may
-     * discard their buffers by applying an operator like {@link #take}{@code (0)} to them.
+     * discard their buffers by applying an operator like {@link #ignoreElements} to them.
      * <dl>
      *  <dt><b>Scheduler:</b></dt>
      *  <dd>{@code groupBy} does not operate by default on a particular {@link Scheduler}.</dd>
@@ -5558,6 +5921,9 @@ public class Observable<T> {
 
     /**
      * Returns an Observable that correlates two Observables when they overlap in time and groups the results.
+     * <p>
+     * There are no guarantees in what order the items get combined when multiple
+     * items from one or both source Observables overlap.
      * <p>
      * <img width="640" height="380" src="https://raw.github.com/wiki/ReactiveX/RxJava/images/rx-operators/groupJoin.png" alt="">
      * <dl>
@@ -5618,17 +5984,15 @@ public class Observable<T> {
      * @return an Observable that emits a Boolean
      * @see <a href="http://reactivex.io/documentation/operators/contains.html">ReactiveX operators documentation: Contains</a>
      */
-    @SuppressWarnings("unchecked")
     public final Observable<Boolean> isEmpty() {
-        return lift((OperatorAny<T>) HolderAnyForEmpty.INSTANCE);
+        return lift(InternalObservableUtils.IS_EMPTY);
     }
     
-    private static class HolderAnyForEmpty {
-        static final OperatorAny<?> INSTANCE = new OperatorAny<Object>(UtilityFunctions.alwaysTrue(), true);
-    }
-
     /**
      * Correlates the items emitted by two Observables based on overlapping durations.
+     * <p>
+     * There are no guarantees in what order the items get combined when multiple
+     * items from one or both source Observables overlap.
      * <p>
      * <img width="640" height="380" src="https://raw.github.com/wiki/ReactiveX/RxJava/images/rx-operators/join_.png" alt="">
      * <dl>
@@ -5785,7 +6149,7 @@ public class Observable<T> {
         return lift(new OperatorMap<T, R>(func));
     }
     
-    private final <R> Observable<R> mapNotification(Func1<? super T, ? extends R> onNext, Func1<? super Throwable, ? extends R> onError, Func0<? extends R> onCompleted) {
+    private <R> Observable<R> mapNotification(Func1<? super T, ? extends R> onNext, Func1<? super Throwable, ? extends R> onError, Func0<? extends R> onCompleted) {
         return lift(new OperatorMapNotification<T, R>(onNext, onError, onCompleted));
     }
 
@@ -5830,7 +6194,10 @@ public class Observable<T> {
     
     /**
      * Modifies an Observable to perform its emissions and notifications on a specified {@link Scheduler},
-     * asynchronously with an unbounded buffer.
+     * asynchronously with a bounded buffer of {@link RxRingBuffer.SIZE} slots.
+     *
+     * <p>Note that onError notifications will cut ahead of onNext notifications on the emission thread if Scheduler is truly
+     * asynchronous. If strict event ordering is required, consider using the {@link #observeOn(Scheduler, boolean)} overload.
      * <p>
      * <img width="640" height="308" src="https://raw.github.com/wiki/ReactiveX/RxJava/images/rx-operators/observeOn.png" alt="">
      * <dl>
@@ -5845,12 +6212,104 @@ public class Observable<T> {
      * @see <a href="http://reactivex.io/documentation/operators/observeon.html">ReactiveX operators documentation: ObserveOn</a>
      * @see <a href="http://www.grahamlea.com/2014/07/rxjava-threading-examples/">RxJava Threading Examples</a>
      * @see #subscribeOn
+     * @see #observeOn(Scheduler, int)
+     * @see #observeOn(Scheduler, boolean)
+     * @see #observeOn(Scheduler, boolean, int)
      */
     public final Observable<T> observeOn(Scheduler scheduler) {
+        return observeOn(scheduler, RxRingBuffer.SIZE);
+    }
+
+    /**
+     * Modifies an Observable to perform its emissions and notifications on a specified {@link Scheduler},
+     * asynchronously with a bounded buffer of configurable size other than the {@link RxRingBuffer.SIZE}
+     * default.
+     *
+     * <p>Note that onError notifications will cut ahead of onNext notifications on the emission thread if Scheduler is truly
+     * asynchronous. If strict event ordering is required, consider using the {@link #observeOn(Scheduler, boolean)} overload.
+     * <p>
+     * <img width="640" height="308" src="https://raw.github.com/wiki/ReactiveX/RxJava/images/rx-operators/observeOn.png" alt="">
+     * <dl>
+     *  <dt><b>Scheduler:</b></dt>
+     *  <dd>you specify which {@link Scheduler} this operator will use</dd>
+     * </dl>
+     *
+     * @param scheduler the {@link Scheduler} to notify {@link Observer}s on
+     * @param bufferSize the size of the buffer.
+     * @return the source Observable modified so that its {@link Observer}s are notified on the specified
+     *         {@link Scheduler}
+     * @see <a href="http://reactivex.io/documentation/operators/observeon.html">ReactiveX operators documentation: ObserveOn</a>
+     * @see <a href="http://www.grahamlea.com/2014/07/rxjava-threading-examples/">RxJava Threading Examples</a>
+     * @see #subscribeOn
+     * @see #observeOn(Scheduler)
+     * @see #observeOn(Scheduler, boolean)
+     * @see #observeOn(Scheduler, boolean, int)
+     */
+    public final Observable<T> observeOn(Scheduler scheduler, int bufferSize) {
+        return observeOn(scheduler, false, bufferSize);
+    }
+
+    /**
+     * Modifies an Observable to perform its emissions and notifications on a specified {@link Scheduler},
+     * asynchronously with a bounded buffer and optionally delays onError notifications.
+     * <p>
+     * <img width="640" height="308" src="https://raw.github.com/wiki/ReactiveX/RxJava/images/rx-operators/observeOn.png" alt="">
+     * <dl>
+     *  <dt><b>Scheduler:</b></dt>
+     *  <dd>you specify which {@link Scheduler} this operator will use</dd>
+     * </dl>
+     * 
+     * @param scheduler
+     *            the {@link Scheduler} to notify {@link Observer}s on
+     * @param delayError
+     *            indicates if the onError notification may not cut ahead of onNext notification on the other side of the
+     *            scheduling boundary. If true a sequence ending in onError will be replayed in the same order as was received
+     *            from upstream
+     * @return the source Observable modified so that its {@link Observer}s are notified on the specified
+     *         {@link Scheduler}
+     * @see <a href="http://reactivex.io/documentation/operators/observeon.html">ReactiveX operators documentation: ObserveOn</a>
+     * @see <a href="http://www.grahamlea.com/2014/07/rxjava-threading-examples/">RxJava Threading Examples</a>
+     * @see #subscribeOn
+     * @see #observeOn(Scheduler)
+     * @see #observeOn(Scheduler, int)
+     * @see #observeOn(Scheduler, boolean, int)
+     */
+    public final Observable<T> observeOn(Scheduler scheduler, boolean delayError) {
+        return observeOn(scheduler, delayError, RxRingBuffer.SIZE);
+    }
+
+    /**
+     * Modifies an Observable to perform its emissions and notifications on a specified {@link Scheduler},
+     * asynchronously with a bounded buffer of configurable size other than the {@link RxRingBuffer.SIZE}
+     * default, and optionally delays onError notifications.
+     * <p>
+     * <img width="640" height="308" src="https://raw.github.com/wiki/ReactiveX/RxJava/images/rx-operators/observeOn.png" alt="">
+     * <dl>
+     *  <dt><b>Scheduler:</b></dt>
+     *  <dd>you specify which {@link Scheduler} this operator will use</dd>
+     * </dl>
+     *
+     * @param scheduler
+     *            the {@link Scheduler} to notify {@link Observer}s on
+     * @param delayError
+     *            indicates if the onError notification may not cut ahead of onNext notification on the other side of the
+     *            scheduling boundary. If true a sequence ending in onError will be replayed in the same order as was received
+     *            from upstream
+     * @param bufferSize the size of the buffer.
+     * @return the source Observable modified so that its {@link Observer}s are notified on the specified
+     *         {@link Scheduler}
+     * @see <a href="http://reactivex.io/documentation/operators/observeon.html">ReactiveX operators documentation: ObserveOn</a>
+     * @see <a href="http://www.grahamlea.com/2014/07/rxjava-threading-examples/">RxJava Threading Examples</a>
+     * @see #subscribeOn
+     * @see #observeOn(Scheduler)
+     * @see #observeOn(Scheduler, int)
+     * @see #observeOn(Scheduler, boolean)
+     */
+    public final Observable<T> observeOn(Scheduler scheduler, boolean delayError, int bufferSize) {
         if (this instanceof ScalarSynchronousObservable) {
             return ((ScalarSynchronousObservable<T>)this).scalarScheduleOn(scheduler);
         }
-        return lift(new OperatorObserveOn<T>(scheduler));
+        return lift(new OperatorObserveOn<T>(scheduler, delayError, bufferSize));
     }
 
     /**
@@ -5868,12 +6327,7 @@ public class Observable<T> {
      * @see <a href="http://reactivex.io/documentation/operators/filter.html">ReactiveX operators documentation: Filter</a>
      */
     public final <R> Observable<R> ofType(final Class<R> klass) {
-        return filter(new Func1<T, Boolean>() {
-            @Override
-            public final Boolean call(T t) {
-                return klass.isInstance(t);
-            }
-        }).cast(klass);
+        return filter(InternalObservableUtils.isInstanceOf(klass)).cast(klass);
     }
 
     /**
@@ -5905,11 +6359,11 @@ public class Observable<T> {
      *  <dd>{@code onBackpressureBuffer} does not operate by default on a particular {@link Scheduler}.</dd>
      * </dl>
      *
-     * @return the source Observable modified to buffer items up to the given capacity
+     * @param capacity number of slots available in the buffer.
+     * @return the source {@code Observable} modified to buffer items up to the given capacity.
      * @see <a href="http://reactivex.io/documentation/operators/backpressure.html">ReactiveX operators documentation: backpressure operators</a>
-     * @since (if this graduates from Experimental/Beta to supported, replace this parenthetical with the release number)
+     * @since 1.1.0
      */
-    @Beta
     public final Observable<T> onBackpressureBuffer(long capacity) {
         return lift(new OperatorOnBackpressureBuffer<T>(capacity));
     }
@@ -5926,13 +6380,49 @@ public class Observable<T> {
      *  <dd>{@code onBackpressureBuffer} does not operate by default on a particular {@link Scheduler}.</dd>
      * </dl>
      *
-     * @return the source Observable modified to buffer items up to the given capacity
+     * @param capacity number of slots available in the buffer.
+     * @param onOverflow action to execute if an item needs to be buffered, but there are no available slots.  Null is allowed.
+     * @return the source {@code Observable} modified to buffer items up to the given capacity
+     * @see <a href="http://reactivex.io/documentation/operators/backpressure.html">ReactiveX operators documentation: backpressure operators</a>
+     * @since 1.1.0
+     */
+    public final Observable<T> onBackpressureBuffer(long capacity, Action0 onOverflow) {
+        return lift(new OperatorOnBackpressureBuffer<T>(capacity, onOverflow));
+    }
+
+    /**
+     * Instructs an Observable that is emitting items faster than its observer can consume them to buffer up to
+     * a given amount of items until they can be emitted. The resulting Observable will behave as determined
+     * by {@code overflowStrategy} if the buffer capacity is exceeded.
+     *
+     * <ul>
+     *     <li>{@code BackpressureOverflow.Strategy.ON_OVERFLOW_ERROR} (default) will {@code onError} dropping all undelivered items,
+     *     unsubscribing from the source, and notifying the producer with {@code onOverflow}. </li>
+     *     <li>{@code BackpressureOverflow.Strategy.ON_OVERFLOW_DROP_LATEST} will drop any new items emitted by the producer while
+     *     the buffer is full, without generating any {@code onError}.  Each drop will however invoke {@code onOverflow}
+     *     to signal the overflow to the producer.</li>j
+     *     <li>{@code BackpressureOverflow.Strategy.ON_OVERFLOW_DROP_OLDEST} will drop the oldest items in the buffer in order to make
+     *     room for newly emitted ones. Overflow will not generate an{@code onError}, but each drop will invoke
+     *     {@code onOverflow} to signal the overflow to the producer.</li>
+     * </ul>
+     *
+     * <p>
+     * <img width="640" height="300" src="https://raw.github.com/wiki/ReactiveX/RxJava/images/rx-operators/bp.obp.buffer.png" alt="">
+     * <dl>
+     *  <dt><b>Scheduler:</b></dt>
+     *  <dd>{@code onBackpressureBuffer} does not operate by default on a particular {@link Scheduler}.</dd>
+     * </dl>
+     *
+     * @param capacity number of slots available in the buffer.
+     * @param onOverflow action to execute if an item needs to be buffered, but there are no available slots.  Null is allowed.
+     * @param overflowStrategy how should the {@code Observable} react to buffer overflows.  Null is not allowed.
+     * @return the source {@code Observable} modified to buffer items up to the given capacity
      * @see <a href="http://reactivex.io/documentation/operators/backpressure.html">ReactiveX operators documentation: backpressure operators</a>
      * @since (if this graduates from Experimental/Beta to supported, replace this parenthetical with the release number)
      */
-    @Beta
-    public final Observable<T> onBackpressureBuffer(long capacity, Action0 onOverflow) {
-        return lift(new OperatorOnBackpressureBuffer<T>(capacity, onOverflow));
+    @Experimental
+    public final Observable<T> onBackpressureBuffer(long capacity, Action0 onOverflow, BackpressureOverflow.Strategy overflowStrategy) {
+        return lift(new OperatorOnBackpressureBuffer<T>(capacity, onOverflow, overflowStrategy));
     }
 
     /**
@@ -5952,9 +6442,8 @@ public class Observable<T> {
      * @return the source Observable modified to drop {@code onNext} notifications on overflow
      * @see <a href="http://reactivex.io/documentation/operators/backpressure.html">ReactiveX operators documentation: backpressure operators</a>
      * @Experimental The behavior of this can change at any time. 
-     * @since (if this graduates from Experimental/Beta to supported, replace this parenthetical with the release number)
+     * @since 1.1.0
      */
-    @Experimental
     public final Observable<T> onBackpressureDrop(Action1<? super T> onDrop) {
         return lift(new OperatorOnBackpressureDrop<T>(onDrop));
     }
@@ -5980,72 +6469,6 @@ public class Observable<T> {
     }
     
     /**
-     * Instructs an Observable that is emitting items faster than its observer can consume them to
-     * block the producer thread.
-     * <p>
-     * <img width="640" height="245" src="https://raw.github.com/wiki/ReactiveX/RxJava/images/rx-operators/bp.obp.block.png" alt="">
-     * <p>
-     * The producer side can emit up to {@code maxQueueLength} onNext elements without blocking, but the
-     * consumer side considers the amount its downstream requested through {@code Producer.request(n)}
-     * and doesn't emit more than requested even if more is available. For example, using 
-     * {@code onBackpressureBlock(384).observeOn(Schedulers.io())} will not throw a MissingBackpressureException.
-     * <p>
-     * Note that if the upstream Observable does support backpressure, this operator ignores that capability
-     * and doesn't propagate any backpressure requests from downstream.
-     * <p>
-     * Warning! Using a chain like {@code source.onBackpressureBlock().subscribeOn(scheduler)} is prone to
-     * deadlocks because the consumption of the internal queue is scheduled behind a blocked emission by
-     * the subscribeOn. In order to avoid this, the operators have to be swapped in the chain: 
-     * {@code source.subscribeOn(scheduler).onBackpressureBlock()} and in general, no subscribeOn operator should follow
-     * this operator.
-     *  
-     * @param maxQueueLength the maximum number of items the producer can emit without blocking
-     * @return the source Observable modified to block {@code onNext} notifications on overflow
-     * @see <a href="http://reactivex.io/documentation/operators/backpressure.html">ReactiveX operators documentation: backpressure operators</a>
-     * @Experimental The behavior of this can change at any time.
-     * @deprecated The operator doesn't work properly with {@link #subscribeOn(Scheduler)} and is prone to
-     *             deadlocks. It will be removed/unavailable starting from 1.1.
-     * @since (if this graduates from Experimental/Beta to supported, replace this parenthetical with the release number)
-     */
-    @Experimental
-    @Deprecated
-    public final Observable<T> onBackpressureBlock(int maxQueueLength) {
-        return lift(new OperatorOnBackpressureBlock<T>(maxQueueLength));
-    }
-
-    /**
-     * Instructs an Observable that is emitting items faster than its observer can consume them to block the
-     * producer thread if the number of undelivered onNext events reaches the system-wide ring buffer size.
-     * <p>
-     * <img width="640" height="245" src="https://raw.github.com/wiki/ReactiveX/RxJava/images/rx-operators/bp.obp.block.png" alt="">
-     * <p>
-     * The producer side can emit up to the system-wide ring buffer size onNext elements without blocking, but
-     * the consumer side considers the amount its downstream requested through {@code Producer.request(n)}
-     * and doesn't emit more than requested even if available.
-     * <p>
-     * Note that if the upstream Observable does support backpressure, this operator ignores that capability
-     * and doesn't propagate any backpressure requests from downstream.
-     * <p>
-     * Warning! Using a chain like {@code source.onBackpressureBlock().subscribeOn(scheduler)} is prone to
-     * deadlocks because the consumption of the internal queue is scheduled behind a blocked emission by
-     * the subscribeOn. In order to avoid this, the operators have to be swapped in the chain: 
-     * {@code source.subscribeOn(scheduler).onBackpressureBlock()} and in general, no subscribeOn operator should follow
-     * this operator.
-     * 
-     * @return the source Observable modified to block {@code onNext} notifications on overflow
-     * @see <a href="http://reactivex.io/documentation/operators/backpressure.html">ReactiveX operators documentation: backpressure operators</a>
-     * @Experimental The behavior of this can change at any time. 
-     * @deprecated The operator doesn't work properly with {@link #subscribeOn(Scheduler)} and is prone to
-     *             deadlocks. It will be removed/unavailable starting from 1.1.
-     * @since (if this graduates from Experimental/Beta to supported, replace this parenthetical with the release number)
-     */
-    @Experimental
-    @Deprecated
-    public final Observable<T> onBackpressureBlock() {
-        return onBackpressureBlock(rx.internal.util.RxRingBuffer.SIZE);
-    }
-    
-    /**
      * Instructs an Observable that is emitting items faster than its observer can consume them to 
      * hold onto the latest value and emit that on request.
      * <p>
@@ -6061,10 +6484,8 @@ public class Observable<T> {
      * requesting more than 1 from downstream doesn't guarantee a continuous delivery of onNext events.
      *
      * @return the source Observable modified so that it emits the most recently-received item upon request
-     * @Experimental The behavior of this can change at any time. 
-     * @since (if this graduates from Experimental/Beta to supported, replace this parenthetical with the release number)
+     * @since 1.1.0
      */
-    @Experimental
     public final Observable<T> onBackpressureLatest() {
         return lift(OperatorOnBackpressureLatest.<T>instance());
     }
@@ -6132,7 +6553,7 @@ public class Observable<T> {
      * @see <a href="http://reactivex.io/documentation/operators/catch.html">ReactiveX operators documentation: Catch</a>
      */
     public final Observable<T> onErrorResumeNext(final Observable<? extends T> resumeSequence) {
-        return lift(new OperatorOnErrorResumeNextViaObservable<T>(resumeSequence));
+        return lift((Operator<T, T>)OperatorOnErrorResumeNextViaFunction.withOther(resumeSequence));
     }
 
     /**
@@ -6162,7 +6583,7 @@ public class Observable<T> {
      * @see <a href="http://reactivex.io/documentation/operators/catch.html">ReactiveX operators documentation: Catch</a>
      */
     public final Observable<T> onErrorReturn(Func1<Throwable, ? extends T> resumeFunction) {
-        return lift(new OperatorOnErrorReturn<T>(resumeFunction));
+        return lift((Operator<T, T>)OperatorOnErrorResumeNextViaFunction.withSingle(resumeFunction));
     }
 
     /**
@@ -6188,7 +6609,7 @@ public class Observable<T> {
      * encountered.
      * <dl>
      *  <dt><b>Scheduler:</b></dt>
-     *  <dd>{@code onErrorResumeNext} does not operate by default on a particular {@link Scheduler}.</dd>
+     *  <dd>{@code onExceptionResumeNext} does not operate by default on a particular {@link Scheduler}.</dd>
      * </dl>
      * 
      * @param resumeSequence
@@ -6198,7 +6619,7 @@ public class Observable<T> {
      * @see <a href="http://reactivex.io/documentation/operators/catch.html">ReactiveX operators documentation: Catch</a>
      */
     public final Observable<T> onExceptionResumeNext(final Observable<? extends T> resumeSequence) {
-        return lift(new OperatorOnExceptionResumeNextViaObservable<T>(resumeSequence));
+        return lift((Operator<T, T>)OperatorOnErrorResumeNextViaFunction.withException(resumeSequence));
     }
 
     /**
@@ -6290,7 +6711,7 @@ public class Observable<T> {
      * <p>
      * <img width="640" height="325" src="https://raw.github.com/wiki/ReactiveX/RxJava/images/rx-operators/reduceSeed.png" alt="">
      * <p>
-     * This technique, which is called "reduce" here, is sometimec called "aggregate," "fold," "accumulate,"
+     * This technique, which is called "reduce" here, is sometimes called "aggregate," "fold," "accumulate,"
      * "compress," or "inject" in other programming contexts. Groovy, for instance, has an {@code inject} method
      * that does a similar operation on lists.
      * <dl>
@@ -6418,18 +6839,7 @@ public class Observable<T> {
      * @see <a href="http://reactivex.io/documentation/operators/repeat.html">ReactiveX operators documentation: Repeat</a>
      */
     public final Observable<T> repeatWhen(final Func1<? super Observable<? extends Void>, ? extends Observable<?>> notificationHandler, Scheduler scheduler) {
-        Func1<? super Observable<? extends Notification<?>>, ? extends Observable<?>> dematerializedNotificationHandler = new Func1<Observable<? extends Notification<?>>, Observable<?>>() {
-            @Override
-            public Observable<?> call(Observable<? extends Notification<?>> notifications) {
-                return notificationHandler.call(notifications.map(new Func1<Notification<?>, Void>() {
-                    @Override
-                    public Void call(Notification<?> notification) {
-                        return null;
-                    }
-                }));
-            }
-        };
-        return OnSubscribeRedo.repeat(this, dematerializedNotificationHandler, scheduler);
+        return OnSubscribeRedo.repeat(this, InternalObservableUtils.createRepeatDematerializer(notificationHandler), scheduler);
     }
 
     /**
@@ -6452,18 +6862,7 @@ public class Observable<T> {
      * @see <a href="http://reactivex.io/documentation/operators/repeat.html">ReactiveX operators documentation: Repeat</a>
      */
     public final Observable<T> repeatWhen(final Func1<? super Observable<? extends Void>, ? extends Observable<?>> notificationHandler) {
-        Func1<? super Observable<? extends Notification<?>>, ? extends Observable<?>> dematerializedNotificationHandler = new Func1<Observable<? extends Notification<?>>, Observable<?>>() {
-            @Override
-            public Observable<?> call(Observable<? extends Notification<?>> notifications) {
-                return notificationHandler.call(notifications.map(new Func1<Notification<?>, Void>() {
-                    @Override
-                    public Void call(Notification<?> notification) {
-                        return null;
-                    }
-                }));
-            }
-        };
-        return OnSubscribeRedo.repeat(this, dematerializedNotificationHandler);
+        return OnSubscribeRedo.repeat(this, InternalObservableUtils.createRepeatDematerializer(notificationHandler));
     }
 
     /**
@@ -6514,12 +6913,7 @@ public class Observable<T> {
      * @see <a href="http://reactivex.io/documentation/operators/replay.html">ReactiveX operators documentation: Replay</a>
      */
     public final <R> Observable<R> replay(Func1<? super Observable<T>, ? extends Observable<R>> selector) {
-        return OperatorReplay.multicastSelector(new Func0<ConnectableObservable<T>>() {
-            @Override
-            public ConnectableObservable<T> call() {
-                return Observable.this.replay();
-            }
-        }, selector);
+        return OperatorReplay.multicastSelector(InternalObservableUtils.createReplaySupplier(this), selector);
     }
 
     /**
@@ -6550,12 +6944,7 @@ public class Observable<T> {
      * @see <a href="http://reactivex.io/documentation/operators/replay.html">ReactiveX operators documentation: Replay</a>
      */
     public final <R> Observable<R> replay(Func1<? super Observable<T>, ? extends Observable<R>> selector, final int bufferSize) {
-        return OperatorReplay.multicastSelector(new Func0<ConnectableObservable<T>>() {
-            @Override
-            public ConnectableObservable<T> call() {
-                return Observable.this.replay(bufferSize);
-            }
-        }, selector);
+        return OperatorReplay.multicastSelector(InternalObservableUtils.createReplaySupplier(this, bufferSize), selector);
     }
 
     /**
@@ -6634,12 +7023,8 @@ public class Observable<T> {
         if (bufferSize < 0) {
             throw new IllegalArgumentException("bufferSize < 0");
         }
-        return OperatorReplay.multicastSelector(new Func0<ConnectableObservable<T>>() {
-            @Override
-            public ConnectableObservable<T> call() {
-                return Observable.this.replay(bufferSize, time, unit, scheduler);
-            }
-        }, selector);
+        return OperatorReplay.multicastSelector(
+                InternalObservableUtils.createReplaySupplier(this, bufferSize, time, unit, scheduler), selector);
     }
 
     /**
@@ -6672,17 +7057,8 @@ public class Observable<T> {
      * @see <a href="http://reactivex.io/documentation/operators/replay.html">ReactiveX operators documentation: Replay</a>
      */
     public final <R> Observable<R> replay(final Func1<? super Observable<T>, ? extends Observable<R>> selector, final int bufferSize, final Scheduler scheduler) {
-        return OperatorReplay.multicastSelector(new Func0<ConnectableObservable<T>>() {
-            @Override
-            public ConnectableObservable<T> call() {
-                return Observable.this.replay(bufferSize);
-            }
-        }, new Func1<Observable<T>, Observable<R>>() {
-            @Override
-            public Observable<R> call(Observable<T> t) {
-                return selector.call(t).observeOn(scheduler);
-            }
-        });
+        return OperatorReplay.multicastSelector(InternalObservableUtils.createReplaySupplier(this, bufferSize), 
+                InternalObservableUtils.createReplaySelectorAndObserveOn(selector, scheduler));
     }
 
     /**
@@ -6750,12 +7126,8 @@ public class Observable<T> {
      * @see <a href="http://reactivex.io/documentation/operators/replay.html">ReactiveX operators documentation: Replay</a>
      */
     public final <R> Observable<R> replay(Func1<? super Observable<T>, ? extends Observable<R>> selector, final long time, final TimeUnit unit, final Scheduler scheduler) {
-        return OperatorReplay.multicastSelector(new Func0<ConnectableObservable<T>>() {
-            @Override
-            public ConnectableObservable<T> call() {
-                return Observable.this.replay(time, unit, scheduler);
-            }
-        }, selector);
+        return OperatorReplay.multicastSelector(
+                InternalObservableUtils.createReplaySupplier(this, time, unit, scheduler), selector);
     }
 
     /**
@@ -6785,17 +7157,9 @@ public class Observable<T> {
      * @see <a href="http://reactivex.io/documentation/operators/replay.html">ReactiveX operators documentation: Replay</a>
      */
     public final <R> Observable<R> replay(final Func1<? super Observable<T>, ? extends Observable<R>> selector, final Scheduler scheduler) {
-        return OperatorReplay.multicastSelector(new Func0<ConnectableObservable<T>>() {
-            @Override
-            public ConnectableObservable<T> call() {
-                return Observable.this.replay();
-            }
-        }, new Func1<Observable<T>, Observable<R>>() {
-            @Override
-            public Observable<R> call(Observable<T> t) {
-                return selector.call(t).observeOn(scheduler);
-            }
-        });
+        return OperatorReplay.multicastSelector(
+                InternalObservableUtils.createReplaySupplier(this), 
+                InternalObservableUtils.createReplaySelectorAndObserveOn(selector, scheduler));
     }
 
     /**
@@ -7131,18 +7495,7 @@ public class Observable<T> {
      * @see <a href="http://reactivex.io/documentation/operators/retry.html">ReactiveX operators documentation: Retry</a>
      */
     public final Observable<T> retryWhen(final Func1<? super Observable<? extends Throwable>, ? extends Observable<?>> notificationHandler) {
-        Func1<? super Observable<? extends Notification<?>>, ? extends Observable<?>> dematerializedNotificationHandler = new Func1<Observable<? extends Notification<?>>, Observable<?>>() {
-            @Override
-            public Observable<?> call(Observable<? extends Notification<?>> notifications) {
-                return notificationHandler.call(notifications.map(new Func1<Notification<?>, Throwable>() {
-                    @Override
-                    public Throwable call(Notification<?> notification) {
-                        return notification.getThrowable();
-                    }
-                }));
-            }
-        };
-        return OnSubscribeRedo.<T> retry(this, dematerializedNotificationHandler);
+        return OnSubscribeRedo.<T>retry(this, InternalObservableUtils.createRetryDematerializer(notificationHandler));
     }
 
     /**
@@ -7169,18 +7522,7 @@ public class Observable<T> {
      * @see <a href="http://reactivex.io/documentation/operators/retry.html">ReactiveX operators documentation: Retry</a>
      */
     public final Observable<T> retryWhen(final Func1<? super Observable<? extends Throwable>, ? extends Observable<?>> notificationHandler, Scheduler scheduler) {
-        Func1<? super Observable<? extends Notification<?>>, ? extends Observable<?>> dematerializedNotificationHandler = new Func1<Observable<? extends Notification<?>>, Observable<?>>() {
-            @Override
-            public Observable<?> call(Observable<? extends Notification<?>> notifications) {
-                return notificationHandler.call(notifications.map(new Func1<Notification<?>, Throwable>() {
-                    @Override
-                    public Throwable call(Notification<?> notification) {
-                        return notification.getThrowable();
-                    }
-                }));
-            }
-        };
-        return OnSubscribeRedo.<T> retry(this, dematerializedNotificationHandler, scheduler);
+        return OnSubscribeRedo.<T> retry(this, InternalObservableUtils.createRetryDematerializer(notificationHandler), scheduler);
     }
 
     /**
@@ -7940,7 +8282,8 @@ public class Observable<T> {
     }
 
     /**
-     * Subscribes to an Observable but ignore its emissions and notifications.
+     * Subscribes to an Observable and ignores {@code onNext} and {@code onCompleted} emissions. If an {@code onError} emission arrives then 
+     * {@link OnErrorNotImplementedException} is thrown. 
      * <dl>
      *  <dt><b>Scheduler:</b></dt>
      *  <dd>{@code subscribe} does not operate by default on a particular {@link Scheduler}.</dd>
@@ -7953,24 +8296,10 @@ public class Observable<T> {
      * @see <a href="http://reactivex.io/documentation/operators/subscribe.html">ReactiveX operators documentation: Subscribe</a>
      */
     public final Subscription subscribe() {
-        return subscribe(new Subscriber<T>() {
-
-            @Override
-            public final void onCompleted() {
-                // do nothing
-            }
-
-            @Override
-            public final void onError(Throwable e) {
-                throw new OnErrorNotImplementedException(e);
-            }
-
-            @Override
-            public final void onNext(T args) {
-                // do nothing
-            }
-
-        });
+        Action1<T> onNext = Actions.empty();
+        Action1<Throwable> onError = InternalObservableUtils.ERROR_NOT_IMPLEMENTED;
+        Action0 onCompleted = Actions.empty();
+        return subscribe(new ActionSubscriber<T>(onNext, onError, onCompleted));
     }
 
     /**
@@ -7995,24 +8324,9 @@ public class Observable<T> {
             throw new IllegalArgumentException("onNext can not be null");
         }
 
-        return subscribe(new Subscriber<T>() {
-
-            @Override
-            public final void onCompleted() {
-                // do nothing
-            }
-
-            @Override
-            public final void onError(Throwable e) {
-                throw new OnErrorNotImplementedException(e);
-            }
-
-            @Override
-            public final void onNext(T args) {
-                onNext.call(args);
-            }
-
-        });
+        Action1<Throwable> onError = InternalObservableUtils.ERROR_NOT_IMPLEMENTED;
+        Action0 onCompleted = Actions.empty();
+        return subscribe(new ActionSubscriber<T>(onNext, onError, onCompleted));
     }
 
     /**
@@ -8043,24 +8357,8 @@ public class Observable<T> {
             throw new IllegalArgumentException("onError can not be null");
         }
 
-        return subscribe(new Subscriber<T>() {
-
-            @Override
-            public final void onCompleted() {
-                // do nothing
-            }
-
-            @Override
-            public final void onError(Throwable e) {
-                onError.call(e);
-            }
-
-            @Override
-            public final void onNext(T args) {
-                onNext.call(args);
-            }
-
-        });
+        Action0 onCompleted = Actions.empty();
+        return subscribe(new ActionSubscriber<T>(onNext, onError, onCompleted));
     }
 
     /**
@@ -8076,7 +8374,7 @@ public class Observable<T> {
      * @param onError
      *             the {@code Action1<Throwable>} you have designed to accept any error notification from the
      *             Observable
-     * @param onComplete
+     * @param onCompleted
      *             the {@code Action0} you have designed to accept a completion notification from the
      *             Observable
      * @return a {@link Subscription} reference with which the {@link Observer} can stop receiving items before
@@ -8087,35 +8385,18 @@ public class Observable<T> {
      *             if {@code onComplete} is null
      * @see <a href="http://reactivex.io/documentation/operators/subscribe.html">ReactiveX operators documentation: Subscribe</a>
      */
-    public final Subscription subscribe(final Action1<? super T> onNext, final Action1<Throwable> onError, final Action0 onComplete) {
+    public final Subscription subscribe(final Action1<? super T> onNext, final Action1<Throwable> onError, final Action0 onCompleted) {
         if (onNext == null) {
             throw new IllegalArgumentException("onNext can not be null");
         }
         if (onError == null) {
             throw new IllegalArgumentException("onError can not be null");
         }
-        if (onComplete == null) {
+        if (onCompleted == null) {
             throw new IllegalArgumentException("onComplete can not be null");
         }
 
-        return subscribe(new Subscriber<T>() {
-
-            @Override
-            public final void onCompleted() {
-                onComplete.call();
-            }
-
-            @Override
-            public final void onError(Throwable e) {
-                onError.call(e);
-            }
-
-            @Override
-            public final void onNext(T args) {
-                onNext.call(args);
-            }
-
-        });
+        return subscribe(new ActionSubscriber<T>(onNext, onError, onCompleted));
     }
 
     /**
@@ -8136,24 +8417,7 @@ public class Observable<T> {
         if (observer instanceof Subscriber) {
             return subscribe((Subscriber<? super T>)observer);
         }
-        return subscribe(new Subscriber<T>() {
-
-            @Override
-            public void onCompleted() {
-                observer.onCompleted();
-            }
-
-            @Override
-            public void onError(Throwable e) {
-                observer.onError(e);
-            }
-
-            @Override
-            public void onNext(T t) {
-                observer.onNext(t);
-            }
-
-        });
+        return subscribe(new ObserverSubscriber<T>(observer));
     }
 
     /**
@@ -8187,10 +8451,8 @@ public class Observable<T> {
             // if an unhandled error occurs executing the onSubscribe we will propagate it
             try {
                 subscriber.onError(hook.onSubscribeError(e));
-            } catch (OnErrorNotImplementedException e2) {
-                // special handling when onError is not implemented ... we just rethrow
-                throw e2;
             } catch (Throwable e2) {
+                Exceptions.throwIfFatal(e2);
                 // if this happens it means the onError itself failed (perhaps an invalid function implementation)
                 // so we are unable to propagate the error correctly and will just throw
                 RuntimeException r = new RuntimeException("Error occurred attempting to subscribe [" + e.getMessage() + "] and then again while trying to pass to onError.", e2);
@@ -8244,7 +8506,7 @@ public class Observable<T> {
         return Observable.subscribe(subscriber, this);
     }
     
-    private static <T> Subscription subscribe(Subscriber<? super T> subscriber, Observable<T> observable) {
+    static <T> Subscription subscribe(Subscriber<? super T> subscriber, Observable<T> observable) {
      // validate and proceed
         if (subscriber == null) {
             throw new IllegalArgumentException("observer can not be null");
@@ -8282,10 +8544,8 @@ public class Observable<T> {
             // if an unhandled error occurs executing the onSubscribe we will propagate it
             try {
                 subscriber.onError(hook.onSubscribeError(e));
-            } catch (OnErrorNotImplementedException e2) {
-                // special handling when onError is not implemented ... we just rethrow
-                throw e2;
             } catch (Throwable e2) {
+                Exceptions.throwIfFatal(e2);
                 // if this happens it means the onError itself failed (perhaps an invalid function implementation)
                 // so we are unable to propagate the error correctly and will just throw
                 RuntimeException r = new RuntimeException("Error occurred attempting to subscribe [" + e.getMessage() + "] and then again while trying to pass to onError.", e2);
@@ -8319,7 +8579,7 @@ public class Observable<T> {
         if (this instanceof ScalarSynchronousObservable) {
             return ((ScalarSynchronousObservable<T>)this).scalarScheduleOn(scheduler);
         }
-        return nest().lift(new OperatorSubscribeOn<T>(scheduler));
+        return create(new OperatorSubscribeOn<T>(this, scheduler));
     }
 
     /**
@@ -8341,6 +8601,30 @@ public class Observable<T> {
      */
     public final <R> Observable<R> switchMap(Func1<? super T, ? extends Observable<? extends R>> func) {
         return switchOnNext(map(func));
+    }
+
+    /**
+     * Returns a new Observable by applying a function that you supply to each item emitted by the source
+     * Observable that returns an Observable, and then emitting the items emitted by the most recently emitted
+     * of these Observables and delays any error until all Observables terminate.
+     * <p>
+     * <img width="640" height="350" src="https://raw.github.com/wiki/ReactiveX/RxJava/images/rx-operators/switchMap.png" alt="">
+     * <dl>
+     *  <dt><b>Scheduler:</b></dt>
+     *  <dd>{@code switchMap} does not operate by default on a particular {@link Scheduler}.</dd>
+     * </dl>
+     * 
+     * @param func
+     *            a function that, when applied to an item emitted by the source Observable, returns an
+     *            Observable
+     * @return an Observable that emits the items emitted by the Observable returned from applying {@code func} to the most recently emitted item emitted by the source Observable
+     * @see <a href="http://reactivex.io/documentation/operators/flatmap.html">ReactiveX operators documentation: FlatMap</a>
+     * @Experimental The behavior of this can change at any time.
+     * @since (if this graduates from Experimental/Beta to supported, replace this parenthetical with the release number)
+     */
+    @Experimental
+    public final <R> Observable<R> switchMapDelayError(Func1<? super T, ? extends Observable<? extends R>> func) {
+        return switchOnNextDelayError(map(func));
     }
 
     /**
@@ -8742,9 +9026,8 @@ public class Observable<T> {
      *         condition after each item, and then completes if the condition is satisfied.
      * @see <a href="http://reactivex.io/documentation/operators/takeuntil.html">ReactiveX operators documentation: TakeUntil</a>
      * @see Observable#takeWhile(Func1)
-     * @since (if this graduates from Experimental/Beta to supported, replace this parenthetical with the release number)
+     * @since 1.1.0
      */
-    @Experimental
     public final Observable<T> takeUntil(final Func1<? super T, Boolean> stopPredicate) {
         return lift(new OperatorTakeUntilPredicate<T>(stopPredicate));
     }
@@ -9650,8 +9933,8 @@ public class Observable<T> {
      * <img width="640" height="400" src="https://raw.github.com/wiki/ReactiveX/RxJava/images/rx-operators/window3.png" alt="">
      * <dl>
      *  <dt><b>Backpressure Support:</b></dt>
-     *  <dd>The operator honors backpressure on its outer subscriber, ignores backpressure in its inner Observables 
-     *  but each of them will emit at most {@code count} elements.</dd>
+     *  <dd>The operator honors backpressure of its inner and outer subscribers, however, the inner Observable uses an
+     *  unbounded buffer that may hold at most {@code count} elements.</dd>
      *  <dt><b>Scheduler:</b></dt>
      *  <dd>This version of {@code window} does not operate by default on a particular {@link Scheduler}.</dd>
      * </dl>
@@ -9660,6 +9943,7 @@ public class Observable<T> {
      *            the maximum size of each window before it should be emitted
      * @return an Observable that emits connected, non-overlapping windows, each containing at most
      *         {@code count} items from the source Observable
+     * @throws IllegalArgumentException if either count is non-positive
      * @see <a href="http://reactivex.io/documentation/operators/window.html">ReactiveX operators documentation: Window</a>
      */
     public final Observable<Observable<T>> window(int count) {
@@ -9675,8 +9959,8 @@ public class Observable<T> {
      * <img width="640" height="365" src="https://raw.github.com/wiki/ReactiveX/RxJava/images/rx-operators/window4.png" alt="">
      * <dl>
      *  <dt><b>Backpressure Support:</b></dt>
-     *  <dd>The operator honors backpressure on its outer subscriber, ignores backpressure in its inner Observables 
-     *  but each of them will emit at most {@code count} elements.</dd>
+     *  <dd>The operator honors backpressure of its inner and outer subscribers, however, the inner Observable uses an
+     *  unbounded buffer that may hold at most {@code count} elements.</dd>
      *  <dt><b>Scheduler:</b></dt>
      *  <dd>This version of {@code window} does not operate by default on a particular {@link Scheduler}.</dd>
      * </dl>
@@ -9688,9 +9972,16 @@ public class Observable<T> {
      *            {@code count} are equal this is the same operation as {@link #window(int)}.
      * @return an Observable that emits windows every {@code skip} items containing at most {@code count} items
      *         from the source Observable
+     * @throws IllegalArgumentException if either count or skip is non-positive
      * @see <a href="http://reactivex.io/documentation/operators/window.html">ReactiveX operators documentation: Window</a>
      */
     public final Observable<Observable<T>> window(int count, int skip) {
+        if (count <= 0) {
+            throw new IllegalArgumentException("count > 0 required but it was " + count);
+        }
+        if (skip <= 0) {
+            throw new IllegalArgumentException("skip > 0 required but it was " + skip);
+        }
         return lift(new OperatorWindowWithSize<T>(count, skip));
     }
 
@@ -9804,7 +10095,7 @@ public class Observable<T> {
      *            new window
      * @param unit
      *            the unit of time that applies to the {@code timespan} argument
-     * @return an Observable that emits connected, non-overlapping windows represending items emitted by the
+     * @return an Observable that emits connected, non-overlapping windows representing items emitted by the
      *         source Observable during fixed, consecutive durations
      * @see <a href="http://reactivex.io/documentation/operators/window.html">ReactiveX operators documentation: Window</a>
      */
@@ -10013,68 +10304,6 @@ public class Observable<T> {
      * @see <a href="http://reactivex.io/documentation/operators/zip.html">ReactiveX operators documentation: Zip</a>
      */
     public final <T2, R> Observable<R> zipWith(Observable<? extends T2> other, Func2<? super T, ? super T2, ? extends R> zipFunction) {
-        return zip(this, other, zipFunction);
+        return (Observable<R>)zip(this, other, zipFunction);
     }
-
-    /**
-     * An Observable that never sends any information to an {@link Observer}.
-     * This Observable is useful primarily for testing purposes.
-     * 
-     * @param <T>
-     *            the type of item (not) emitted by the Observable
-     */
-    private static class NeverObservable<T> extends Observable<T> {
-        
-        private static class Holder {
-            static final NeverObservable<?> INSTANCE = new NeverObservable<Object>();
-        }
-        
-        /**
-         * Returns a singleton instance of NeverObservble (cast to the generic type).
-         * 
-         * @return
-         */
-        @SuppressWarnings("unchecked")
-        static <T> NeverObservable<T> instance() {
-            return (NeverObservable<T>) Holder.INSTANCE;
-        }
-        
-        NeverObservable() {
-            super(new OnSubscribe<T>() {
-
-                @Override
-                public void call(Subscriber<? super T> observer) {
-                    // do nothing
-                }
-
-            });
-        }
-    }
-
-    /**
-     * An Observable that invokes {@link Observer#onError onError} when the {@link Observer} subscribes to it.
-     * 
-     * @param <T>
-     *            the type of item (ostensibly) emitted by the Observable
-     */
-    private static class ThrowObservable<T> extends Observable<T> {
-
-        public ThrowObservable(final Throwable exception) {
-            super(new OnSubscribe<T>() {
-
-                /**
-                 * Accepts an {@link Observer} and calls its {@link Observer#onError onError} method.
-                 * 
-                 * @param observer
-                 *            an {@link Observer} of this Observable
-                 */
-                @Override
-                public void call(Subscriber<? super T> observer) {
-                    observer.onError(exception);
-                }
-
-            });
-        }
-    }
-
 }

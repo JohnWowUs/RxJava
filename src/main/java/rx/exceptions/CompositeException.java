@@ -15,20 +15,15 @@
  */
 package rx.exceptions;
 
-import java.io.PrintStream;
-import java.io.PrintWriter;
-import java.util.ArrayList;
-import java.util.Collection;
-import java.util.Collections;
-import java.util.HashSet;
-import java.util.LinkedHashSet;
-import java.util.List;
-import java.util.Set;
+import java.io.*;
+import java.util.*;
+
+import rx.annotations.Experimental;
 
 /**
  * Represents an exception that is a composite of one or more other exceptions. A {@code CompositeException}
  * does not modify the structure of any exception it wraps, but at print-time it iterates through the list of
- * Throwables contained in the composit in order to print them all.
+ * Throwables contained in the composite in order to print them all.
  *
  * Its invariant is to contain an immutable, ordered (by insertion order), unique list of non-composite
  * exceptions. You can retrieve individual exceptions in this list with {@link #getExceptions()}.
@@ -46,6 +41,8 @@ public final class CompositeException extends RuntimeException {
     private final List<Throwable> exceptions;
     private final String message;
 
+    /** @deprecated please use {@link #CompositeException(Collection)} */
+    @Deprecated
     public CompositeException(String messagePrefix, Collection<? extends Throwable> errors) {
         Set<Throwable> deDupedExceptions = new LinkedHashSet<Throwable>();
         List<Throwable> _exceptions = new ArrayList<Throwable>();
@@ -71,6 +68,34 @@ public final class CompositeException extends RuntimeException {
 
     public CompositeException(Collection<? extends Throwable> errors) {
         this(null, errors);
+    }
+
+    /**
+     * Constructs a CompositeException instance with the supplied initial Throwables.
+     * @param errors the array of Throwables
+     */
+    @Experimental
+    public CompositeException(Throwable... errors) {
+        Set<Throwable> deDupedExceptions = new LinkedHashSet<Throwable>();
+        List<Throwable> _exceptions = new ArrayList<Throwable>();
+        if (errors != null) {
+            for (Throwable ex : errors) {
+                if (ex instanceof CompositeException) {
+                    deDupedExceptions.addAll(((CompositeException) ex).getExceptions());
+                } else 
+                if (ex != null) {
+                    deDupedExceptions.add(ex);
+                } else {
+                    deDupedExceptions.add(new NullPointerException());
+                }
+            }
+        } else {
+            deDupedExceptions.add(new NullPointerException());
+        }
+
+        _exceptions.addAll(deDupedExceptions);
+        this.exceptions = Collections.unmodifiableList(_exceptions);
+        this.message = exceptions.size() + " exceptions occurred. ";
     }
 
     /**
@@ -118,12 +143,13 @@ public final class CompositeException extends RuntimeException {
                 // we now have 'e' as the last in the chain
                 try {
                     chain.initCause(e);
+                    chain = chain.getCause();
                 } catch (Throwable t) {
                     // ignore
                     // the javadocs say that some Throwables (depending on how they're made) will never
                     // let me call initCause without blowing up even if it returns null
+                    chain = e;
                 }
-                chain = chain.getCause();
             }
             cause = _cause;
         }
@@ -247,7 +273,7 @@ public final class CompositeException extends RuntimeException {
         }
     }
 
-    private final List<Throwable> getListOfCauses(Throwable ex) {
+    private List<Throwable> getListOfCauses(Throwable ex) {
         List<Throwable> list = new ArrayList<Throwable>();
         Throwable root = ex.getCause();
         if (root == null) {

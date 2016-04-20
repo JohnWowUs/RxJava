@@ -43,6 +43,9 @@ public final class Actions {
             Action8<T0, T1, T2, T3, T4, T5, T6, T7>,
             Action9<T0, T1, T2, T3, T4, T5, T6, T7, T8>,
             ActionN {
+        EmptyAction() {
+        }
+
         @Override
         public void call() {
         }
@@ -428,5 +431,28 @@ public final class Actions {
                 return result;
             }
         };
+    }
+    
+    /**
+     * Wraps an Action0 instance into an Action1 instance where the latter calls
+     * the former.
+     * @param action the action to call
+     * @return the new Action1 instance
+     */
+    public static <T> Action1<T> toAction1(Action0 action) {
+        return new Action1CallsAction0<T>(action);
+    }
+    
+    static final class Action1CallsAction0<T> implements Action1<T> {
+        final Action0 action;
+        
+        public Action1CallsAction0(Action0 action) {
+            this.action = action;
+        }
+        
+        @Override
+        public void call(T t) {
+            action.call();
+        }
     }
 }
